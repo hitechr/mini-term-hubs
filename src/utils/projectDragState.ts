@@ -42,9 +42,17 @@ export function initProjectDrag(
   _payload = payload;
   _dragging = false;
 
+  // 本次拖拽是否真的激活过。收尾必须只认这个函数内的局部量：模块级 _dragging
+  // 会被**下一次** initProjectDrag 重置（上一次的 mouseup 丢失时就会发生——
+  // 拖出 WebView 或中途失焦），拿它当条件会跳过本行的收尾，源行永久停在
+  // 40% 透明度、body 也一直挂着 grabbing 光标，只有重启才恢复。
+  // 写法与 fileDragState / SshModal 的连接行拖拽一致。
+  let everDragged = false;
+
   const onMove = (e: MouseEvent) => {
     if (!_dragging && Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY) > 5) {
       _dragging = true;
+      everDragged = true;
       el.style.opacity = '0.4';
       document.body.classList.add('project-dragging');
     }
@@ -54,7 +62,7 @@ export function initProjectDrag(
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
 
-    if (_dragging) {
+    if (everDragged) {
       el.style.opacity = '';
       document.body.classList.remove('project-dragging');
       // 抑制紧随 mouseup 的 click，防止触发 onClick（如切换项目、折叠分组）

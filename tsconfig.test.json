@@ -29,6 +29,7 @@
     "src/utils/aiResume.ts",
     "src/utils/attentionTarget.ts",
     "src/utils/sessionBranch.ts",
-    "src/utils/layoutOps.ts"
+    "src/utils/layoutOps.ts",
+    "src/utils/projectDragState.ts"
   ]
 }
