@@ -242,6 +242,10 @@ fn default_launchers() -> Vec<AiLauncher> {
 #[serde(rename_all = "camelCase")]
 pub struct SavedPane {
     pub shell_name: String,
+    /// 用户给这个 pane 起的名字(右键重命名 / 双击 tab);缺省回落 shell 名。
+    /// 不落盘的话重启后 tab 上的名字就没了 —— 分屏多时全是同名 shell,认不出谁是谁。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
     /// 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -943,6 +947,7 @@ mod tests {
                             pane: None,
                             panes: vec![SavedPane {
                                 shell_name: "cmd".into(),
+                                custom_title: None,
                                 cwd: None,
                                 ai_session: None,
                             }],
@@ -951,6 +956,7 @@ mod tests {
                             pane: None,
                             panes: vec![SavedPane {
                                 shell_name: "powershell".into(),
+                                custom_title: None,
                                 cwd: None,
                                 ai_session: None,
                             }],

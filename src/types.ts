@@ -253,6 +253,8 @@ export interface SshConnection {
 
 export interface SavedPane {
   shellName: string;
+  /** 用户给这个 pane 起的名字(右键重命名 / 双击 tab);缺省回落 shell 名 */
+  customTitle?: string;
   /** 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd */
   cwd?: string;
   /** 退出时该 pane 正在跑的 AI 会话;重启后据此自动 resume 续接 */

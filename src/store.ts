@@ -398,7 +398,7 @@ function updateProjectPane(
 // 序列化 SplitNode 树（剥离运行时数据）
 function serializeSplitNode(node: SplitNode): SavedSplitNode {
   if (node.type === 'leaf') {
-    return { type: 'leaf', panes: node.panes.map((p) => ({ shellName: p.shellName, cwd: p.cwd, aiSession: p.aiSession })) };
+    return { type: 'leaf', panes: node.panes.map((p) => ({ shellName: p.shellName, customTitle: p.customTitle, cwd: p.cwd, aiSession: p.aiSession })) };
   }
   return {
     type: 'split',
@@ -1187,8 +1187,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     ))),
 
   // 移动端改会话名:按 paneId 全局找（移动端只认得 pane，不知道它挂在哪个项目下）。
-  // pane 级 customTitle 不进 savedLayout，所以不落配置——AI 会话本来就活不过重启。
-  renamePaneById: (paneId, title) =>
+  // customTitle 现在进 savedLayout，改完即落盘 —— 与桌面端右键重命名同一口径，
+  // 否则移动端改的名字要等下一次别的操作触发保存才顺带存上，存不存全看运气。
+  renamePaneById: (paneId, title) => {
+    let touched: string | null = null;
     set((state) => {
       const nextTitle = title || undefined; // 空串 = 清掉自定义名，回落 shell 名
       const newStates = new Map(state.projectStates);
@@ -1199,10 +1201,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
         );
         if (layout === ps.layout) continue;
         newStates.set(pid, { ...ps, layout });
+        touched = pid;
         return { projectStates: newStates }; // paneId 全局唯一，命中即收工
       }
       return state;
-    }),
+    });
+    if (touched) saveLayoutToConfig(touched);
+  },
 
   addMarker: (payload, xtermMarkerId) => {
     const id = crypto.randomUUID();
