@@ -1859,11 +1859,21 @@ impl UsagePanel {
         // 这三块是 GPUI 侧新加的(`byTool`/`byShell`/`byMcp` 在 `types.ts` 里有
         // 类型,旧版面板从没渲染过),`usageStats.{byTool,byShell}` 由 M 批补进
         // TS 源头;MCP 是专有名词,与厂商名一样不进字典。**重构渲染时别顺手删掉**。
+        //
+        // ⚠️ **本 fork 的偏好改动**:`HIDDEN_RANKS` 里的都不画。眼下三块全在里面 ——
+        // 面板到「Top 会话」为止,底下这些计数排行用不上。数组与渲染逻辑**原样留着**
+        // (上面那句「别顺手删掉」是作者明确留的),聚合侧也照旧算、单测照旧覆盖,
+        // 只是不渲染;想恢复哪块就把它从 `HIDDEN_RANKS` 里去掉。
+        // **这条不往上游提**:是本地取舍,不是缺陷。
+        const HIDDEN_RANKS: [&str; 3] = ["tool", "shell", "mcp"];
         for (id, title, items) in [
             ("tool", t("usageStats", "byTool"), &stats.by_tool),
             ("shell", t("usageStats", "byShell"), &stats.by_shell),
             ("mcp", "MCP", &stats.by_mcp),
         ] {
+            if HIDDEN_RANKS.contains(&id) {
+                continue;
+            }
             if items.is_empty() {
                 continue;
             }
