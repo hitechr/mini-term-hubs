@@ -405,7 +405,59 @@ pub fn play_sound(custom_path: Option<&str>) {
     }
 }
 
-#[cfg(not(windows))]
+/// 提示音(macOS)。与 Windows 分支**同一套三级回落**,连内置双音都共用
+/// [`notification_wave`] 那份内存 WAV —— 两个平台听到的是同一个声音:
+///
+/// 1. 自定义 `.wav` → `NSSound(contentsOfFile:)`;
+/// 2. **内置 880→660 双音**(`NSSound(data:)`);
+/// 3. `NSBeep()` 兜底。
+///
+/// ⚠️ **`NSSound::play` 是异步的,`Retained` 一 drop 声音立刻停** —— 必须把它
+/// 留在 [`PLAYING`] 里。新的一声顶掉旧的那声(旧 `NSSound` 随之释放、停播),
+/// 与 Windows 分支 `SND_ASYNC` 的「新声打断旧声」是同一个行为。
+///
+/// 已知偏差与 Windows 分支相同:自定义音只认 `.wav`。
+#[cfg(target_os = "macos")]
+pub fn play_sound(custom_path: Option<&str>) {
+    use objc2::AllocAnyThread;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSBeep, NSSound};
+    use objc2_foundation::{NSData, NSString};
+
+    thread_local! {
+        static PLAYING: std::cell::RefCell<Option<Retained<NSSound>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// 播放并留住引用;返回是否真的响了。
+    fn keep_playing(sound: Retained<NSSound>) -> bool {
+        let ok = sound.play();
+        PLAYING.with(|slot| *slot.borrow_mut() = Some(sound));
+        ok
+    }
+
+    if let Some(path) = custom_path.filter(|p| p.to_ascii_lowercase().ends_with(".wav")) {
+        let ns_path = NSString::from_str(path);
+        // 文件没了 / 格式不认时继续往下走内置双音,而不是静默(同 Windows 分支)
+        if let Some(sound) =
+            NSSound::initWithContentsOfFile_byReference(NSSound::alloc(), &ns_path, false)
+            && keep_playing(sound)
+        {
+            return;
+        }
+    }
+
+    let data = NSData::with_bytes(notification_wave());
+    if let Some(sound) = NSSound::initWithData(NSSound::alloc(), &data)
+        && keep_playing(sound)
+    {
+        return;
+    }
+
+    NSBeep();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn play_sound(_custom_path: Option<&str>) {}
 
 /// 任务栏闪烁。等价于旧版的 `requestUserAttention(Informational)`。
@@ -442,7 +494,38 @@ pub fn flash_taskbar(window: &gpui::Window) {
     }
 }
 
-#[cfg(not(windows))]
+/// Dock 跳动(macOS)。与 Windows 的任务栏闪烁同为旧版
+/// `requestUserAttention(Informational)` 的等价物 —— 那个 Tauri API 本就是跨平台的,
+/// GPUI 迁移期只补了 Windows 一侧,macOS 上这一条一直是空实现。
+///
+/// 档位取 `InformationalRequest`:Dock 图标弹一次就停。`CriticalRequest` 会一直弹
+/// 到应用被激活为止,那是「必须立刻处理」级别的,AI 跑完一轮不配 —— 且与旧版
+/// 传的档位一致。
+///
+/// **这里必须自己判焦点**,与 Windows 分支不同:`FLASHW_TIMERNOFG` 在窗口已在
+/// 前台时天然什么都不做,而 AppKit 明确要求「只在应用未激活时调用」
+/// (`plan.flash` 那一层不区分焦点,见 [`DoneTracker::plan_alert`])。
+///
+/// `window` 参数用不上 —— AppKit 这套注意机制挂在**应用**而不是窗口上;
+/// 签名与 Windows 分支保持一致,调用方不必分平台。
+#[cfg(target_os = "macos")]
+pub fn flash_taskbar(_window: &gpui::Window) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSRequestUserAttentionType};
+
+    // 非主线程拿不到 `NSApplication`(AppKit 的硬要求)。调用点在 GPUI 主线程上,
+    // 这里只是把该条件显式化,不为它另开一条跳线程的路。
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if app.isActive() {
+        return;
+    }
+    let _request_id = app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn flash_taskbar(_window: &gpui::Window) {}
 
 #[cfg(test)]

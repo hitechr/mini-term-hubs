@@ -102,6 +102,23 @@ reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features =
 # 依赖之上追加不动根 manifest(与 gpui-component 的 tree-sitter 同一手法)。
 gpui = { workspace = true, features = ["x11", "wayland"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Dock 跳动(NSApplication::requestUserAttention)与提示音(NSSound / NSBeep)。
+# 版本跟随 gpui 的 macOS 后端已经在用的那两个,不给依赖树引入第二份 objc2。
+# feature 按类名门控,只开真正用到的四个。
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    # NSApplication:requestUserAttention / isActive
+    "NSApplication",
+    # 提示音
+    "NSSound",
+    # NSBeep 兜底住在 NSGraphics 里(不是 NSSound)。它已被 NSApplication 隐含
+    # 启用,仍显式列出:用到了它的符号就该声明,免得上游哪天改了 feature 传递
+    # 关系,兜底那一行突然编不过。
+    "NSGraphics",
+] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
+
 [target.'cfg(windows)'.dependencies]
 # 任务栏闪烁(FlashWindowEx)、提示音(MessageBeep / PlaySoundW)与系统托盘。
 # 版本跟随 gpui 已经在用的那个,不给依赖树引入第二份 windows crate。
