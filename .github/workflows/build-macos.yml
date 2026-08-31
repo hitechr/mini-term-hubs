@@ -1,0 +1,133 @@
+name: Build macOS
+
+# 只出 macOS arm64 产物的手动流水线(本 fork 私有,上游没有这个文件)。
+#
+# 为什么另起一个文件而不是改 release.yml:
+# - release.yml 是上游的,按 `v*` 标签触发、三平台矩阵一起跑。在上面加平台过滤
+#   会让每次同步上游都撞冲突;这里只增文件,合并时零摩擦
+# - 手动触发不需要打标签,也就不会在 fork 上凭空造出一堆 GitHub Release
+#
+# 与 release.yml 的 macOS 分支的两处差异:
+# - 版本号从根 Cargo.toml 读(没有标签可剥)
+# - **多一步 ad-hoc 签名**。上游是 mkdir + cp 手工拼 bundle、全程不签,于是
+#   `Sealed Resources=none`;这样的 bundle 带着浏览器下载打上的
+#   `com.apple.quarantine` 过 Gatekeeper 时,macOS 报的是「已损坏,无法打开」——
+#   文案骗人(文件没坏),而且这一类失败右键「打开」也绕不过去。补一次 ad-hoc 签名
+#   把资源封装做出来,失败档位就降回「无法验证开发者」,右键打开即可放行。
+#   ⚠️ ad-hoc 签名不等于公证(notarization),隔离属性该去还是得去:
+#   `xattr -dr com.apple.quarantine /Applications/Mini-Term.app`
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS arm64 dmg
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            sidecars -> target
+
+      # sidecar 产物就位到 target/release/,下面的组装步骤直接从那里收 ——
+      # 「目录布局即最终包布局」,与 release.yml 同一口径
+      - name: Build & stage sidecars
+        run: node scripts/stage-sidecars.mjs --release --target aarch64-apple-darwin
+
+      - name: Build GPUI app
+        run: cargo build --release --package mt-app
+
+      - name: Assemble .app bundle + dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -z "$VERSION" ]; then
+            echo "::error::没能从根 Cargo.toml 读出版本号"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_ENV"
+          APP="dist/Mini-Term.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          for name in mini-term miniterm-hook mt-ssh-cli mt-ssh-mcp; do
+            cp "target/release/$name" "$APP/Contents/MacOS/"
+          done
+          mkdir -p icon.iconset
+          for size in 16 32 128 256 512; do
+            sips -z "$size" "$size" docs/icon.png --out "icon.iconset/icon_${size}x${size}.png" >/dev/null
+          done
+          iconutil -c icns icon.iconset -o "$APP/Contents/Resources/icon.icns"
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Mini-Term</string>
+            <key>CFBundleDisplayName</key><string>Mini-Term</string>
+            <key>CFBundleIdentifier</key><string>com.mini-term.app</string>
+            <key>CFBundleExecutable</key><string>mini-term</string>
+            <key>CFBundleIconFile</key><string>icon</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+      # 三个 sidecar 是并列摆在 Contents/MacOS/ 里的独立可执行文件,不是嵌套
+      # bundle —— 先逐个签,最后签 bundle(那一步同时签主程序并封装资源)。
+      # 不用 `--deep`:Apple 已弃用它,且这里的结构显式签更清楚。
+      - name: Ad-hoc codesign bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="dist/Mini-Term.app"
+          for name in miniterm-hook mt-ssh-cli mt-ssh-mcp; do
+            codesign --force --sign - "$APP/Contents/MacOS/$name"
+          done
+          codesign --force --sign - "$APP"
+          echo "--- 签名结果 ---"
+          codesign -dv "$APP" 2>&1
+          codesign --verify --strict --verbose=2 "$APP" 2>&1
+
+      - name: Create dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdiutil create -volname "Mini-Term" -srcfolder "dist/Mini-Term.app" -ov -format UDZO \
+            "dist/Mini-Term_${{ env.version }}_aarch64.dmg"
+          ls -la dist
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mini-Term_${{ env.version }}_aarch64_dmg
+          path: dist/Mini-Term_*.dmg
+          if-no-files-found: error
+          retention-days: 14
