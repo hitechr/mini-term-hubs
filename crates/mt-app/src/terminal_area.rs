@@ -1456,10 +1456,7 @@ impl TerminalArea {
                             menu::show(event.position, entries, window, cx);
                         }),
                     )
-                    .child(ui::status_dot(
-                        SharedString::from(format!("collapsed-status-{pane_id}")),
-                        status,
-                    ))
+                    .child(ui::status_dot(status))
                     .when_some(vendor, |el, vendor| {
                         el.child(BrandIcon::new(Some(vendor)).size(px(12.0)).color(
                             if is_active {
@@ -1835,10 +1832,7 @@ impl TerminalArea {
                     )
                     // 动画 id 拿 pane id 拼(跨帧稳定、逐 tab 唯一);**不能用循环
                     // 下标** —— 删掉中间一个 tab 会让后面所有状态灯的动画进度跳一格
-                    .child(ui::status_dot(
-                        gpui::SharedString::from(format!("status-pane-{}", pane.id)),
-                        pane.status,
-                    ))
+                    .child(ui::status_dot(pane.status))
                     // AI 品牌图标(原版 `PaneGroup.tsx` 的 `aiActive && <BrandIcon/>`):
                     // 只在这个 pane 真有 AI 会话身份时出现,认不出厂商就不占位
                     .when_some(vendor, |el, vendor| {
@@ -1910,16 +1904,17 @@ impl TerminalArea {
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     // 与 tab 同理:别让这一下冒到 tab 栏的「双击空白处最大化」上
                     cx.stop_propagation();
-                    let (shells, launchers) = {
-                        let store = this.store.read(cx);
-                        (
-                            store.config().available_shells.clone(),
-                            store.mobile_relay().launchers,
-                        )
-                    };
+                    let (shells, launchers) =
+                        pane_actions::new_terminal_menu_data(this.store.read(cx), &pid_new);
                     if !pane_actions::should_show_new_terminal_menu(shells.len(), launchers.len()) {
                         this.store.update(cx, |store, cx| {
-                            store.new_terminal(&pid_new, None, Some(anchor_new.clone()), window, cx);
+                            store.new_terminal(
+                                &pid_new,
+                                None,
+                                Some(anchor_new.clone()),
+                                window,
+                                cx,
+                            );
                         });
                         return;
                     }
@@ -3131,13 +3126,8 @@ impl Render for TerminalArea {
                         // 唯一差别是 anchor:空态没有「当前 pane」可挨着放,传 None
                         // (原版那边也是 `newTerminal(projectId)` 不带 targetPaneId)。
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            let (shells, launchers) = {
-                                let store = this.store.read(cx);
-                                (
-                                    store.config().available_shells.clone(),
-                                    store.mobile_relay().launchers,
-                                )
-                            };
+                            let (shells, launchers) =
+                                pane_actions::new_terminal_menu_data(this.store.read(cx), &pid);
                             if !pane_actions::should_show_new_terminal_menu(
                                 shells.len(),
                                 launchers.len(),
