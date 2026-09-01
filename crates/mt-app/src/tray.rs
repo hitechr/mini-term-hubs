@@ -39,6 +39,9 @@
 //! (`ShowWindow`/`SetForegroundWindow`),在托盘线程里做 —— 点击托盘图标时
 //! 前台锁正好允许本进程抢前台,换到主线程就错过这个窗口了。
 //!
+//! macOS 侧结构不同:`NSStatusItem` 必须在主线程,于是没有托盘线程 —— push 直接
+//! 落在 GPUI 主线程上,闪烁由主 runloop 的 `NSTimer` 推(详见该 `platform` 模块)。
+//!
 //! # 为什么不用 `tray-icon` crate
 //!
 //! 它会拉进 muda + 一套全局事件循环钩子,与 gpui 自己的 Windows 消息循环共存有
@@ -199,7 +202,7 @@ pub fn build_snapshot(
 // ─── 纯函数:灯色与画帧 ──────────────────────────────────────
 
 /// 当前活跃的颜色集合(顺序固定 黄→蓝→绿;灰不在集合里,空 = 灰)。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn active_colors(lamps: Lamps) -> Vec<[u8; 3]> {
     let mut colors = Vec::new();
     if lamps.attention {
@@ -218,7 +221,7 @@ fn active_colors(lamps: Lamps) -> Vec<[u8; 3]> {
 ///
 /// 静止(聚焦 / 已定格 / 安静)= 最高优先级色全亮;
 /// 失焦单状态 = 亮暗呼吸;失焦多状态 = 颜色轮转(全亮)。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn frame_color(colors: &[[u8; 3]], frame: usize, blinking: bool) -> ([u8; 3], bool) {
     match colors.len() {
         0 => (GRAY, false),
@@ -237,7 +240,7 @@ fn frame_color(colors: &[[u8; 3]], frame: usize, blinking: bool) -> ([u8; 3], bo
 ///
 /// 实心圆 + 1px 软边抗锯齿,无边框无描边;返回 **RGBA**(Win32 那一层再转
 /// 预乘 BGRA)。`dim` = 暗帧(alpha 压到 [`DIM`],用于单状态呼吸闪烁)。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn compose_frame_rgba(size: u32, color: [u8; 3], dim: bool) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let radius = size as f32 * RADIUS_RATIO;
@@ -268,14 +271,14 @@ fn compose_frame_rgba(size: u32, color: [u8; 3], dim: bool) -> Vec<u8> {
 /// 闪烁相位。装机版把它散在 `TrayLightState` 的两个字段 + 线程循环里,
 /// 这里收成一个可单测的小状态机(`tray.rs:224-242` 的同一条判据链)。
 #[derive(Default)]
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 struct Blink {
     frame: usize,
     /// 单状态短促闪烁结束后已定格全亮,不再重绘。
     settled: bool,
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 impl Blink {
     /// 灯色/焦点变化 → 新状态从「全亮」帧开始,并重新允许短促闪烁。
     fn reset(&mut self) {
@@ -307,7 +310,8 @@ impl Blink {
 
 // ─── 对外句柄 ────────────────────────────────────────────────
 
-/// 托盘句柄。**主线程持有**,drop 时把图标摘掉并收掉托盘线程。
+/// 托盘句柄。**主线程持有**,drop 时把图标摘掉(Windows 侧还要收掉托盘线程,
+/// macOS 侧则是停掉闪烁定时器 —— 见各自的 `platform` 模块)。
 pub struct Tray {
     handle: Option<platform::TrayHandle>,
     /// 上一次真正推下去的签名(去重,`store.ts` 的 `lastTraySig`)。
@@ -317,11 +321,13 @@ pub struct Tray {
 impl Tray {
     /// 建托盘。返回句柄 + 交互事件的接收端。
     ///
-    /// 建不起来(非 Windows / 取不到 HWND / 注册窗口失败)时句柄是空壳、
-    /// 接收端立刻结束 —— 与装机版「初始化失败只 eprintln 不中断启动」同语义。
+    /// 建不起来(Linux / Windows 取不到 HWND 或注册窗口失败 / macOS 不在主线程)时
+    /// 句柄是空壳、接收端立刻结束 —— 与装机版「初始化失败只 eprintln 不中断启动」
+    /// 同语义。**要什么由各平台自己取**:Windows 要主窗口 HWND(托盘消息得有窗口
+    /// 收),macOS 的 `NSStatusItem` 挂在应用上、只需要主线程标记。
     pub fn start(window: &gpui::Window) -> (Self, UnboundedReceiver<TrayEvent>) {
         let (tx, rx) = mpsc::unbounded();
-        let handle = main_window_handle(window).and_then(|hwnd| platform::start(hwnd, tx));
+        let handle = platform::start(window, tx);
         if handle.is_none() {
             eprintln!("[tray] 托盘未启用(平台不支持或初始化失败)");
         }
@@ -364,29 +370,333 @@ fn main_window_handle(window: &gpui::Window) -> Option<isize> {
     Some(win32.hwnd.get())
 }
 
-#[cfg(not(windows))]
-fn main_window_handle(_window: &gpui::Window) -> Option<isize> {
-    None
-}
-
 // ─── 平台实现 ────────────────────────────────────────────────
 
-/// 非 Windows:空实现(与 `notify::play_sound` 同款分层)。
-/// macOS 的 `NSStatusItem` / Linux 的 StatusNotifierItem 都是另一套 API,
-/// 接口留在这里,补的时候只换这个模块。
-#[cfg(not(windows))]
+/// 非 Windows / 非 macOS(即 Linux):空实现。
+/// StatusNotifierItem 是另一套 API,接口留在这里,补的时候只换这个模块。
+#[cfg(not(any(windows, target_os = "macos")))]
 mod platform {
     use super::{TrayEvent, TraySnapshot};
     use futures::channel::mpsc::UnboundedSender;
 
     pub struct TrayHandle;
 
-    pub fn start(_main_hwnd: isize, _events: UnboundedSender<TrayEvent>) -> Option<TrayHandle> {
+    pub fn start(
+        _window: &gpui::Window,
+        _events: UnboundedSender<TrayEvent>,
+    ) -> Option<TrayHandle> {
         None
     }
 
     impl TrayHandle {
         pub fn push(&self, _snapshot: TraySnapshot) {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    //! `NSStatusItem` 直写。
+    //!
+    //! # 与 Win32 版的结构差异:**没有托盘线程**
+    //!
+    //! Win32 那边必须另起线程 + 一个隐藏窗口,因为托盘回调消息只能送到窗口,而主
+    //! 窗口的 WndProc 归 gpui 管。AppKit 这边正好反过来:`NSStatusItem` / `NSMenu`
+    //! **必须在主线程操作**,而 [`super::Tray::push`] 本来就在 GPUI 主线程上被调用
+    //! —— 于是整条链路同线程,不需要 channel + `PostMessage`,闪烁也改由挂在主
+    //! runloop 上的 `NSTimer` 驱动(Win32 那边是托盘线程里的 `SetTimer`)。
+    //!
+    //! # 点击语义按 macOS 惯例走
+    //!
+    //! Win32 版是「左键唤窗、右键弹菜单」;macOS 的状态栏项左右键都该弹菜单,于是
+    //! 「唤起窗口」收进菜单首项(`trayOpen`),点它才发 [`TrayEvent::Clicked`]。
+    //! 事件语义本身不变 —— 发之前先激活应用,与 Win32 版注释里「窗口**已经被唤起**,
+    //! 这里只负责 `trayClickFocus` 门控下的跳转」对齐。
+
+    use std::cell::RefCell;
+    use std::ptr::NonNull;
+    use std::rc::Rc;
+
+    use block2::RcBlock;
+    use futures::channel::mpsc::UnboundedSender;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{
+        AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+    };
+    use objc2_app_kit::{
+        NSApplication, NSBitmapImageRep, NSDeviceRGBColorSpace, NSImage, NSMenu, NSMenuItem,
+        NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    };
+    use objc2_foundation::{NSObject, NSObjectProtocol, NSSize, NSString, NSTimer};
+
+    use super::{
+        BLINK_MS, Blink, TrayEvent, TraySnapshot, active_colors, compose_frame_rgba, frame_color,
+    };
+    use crate::i18n::t;
+
+    /// 图标边长(**物理**像素)。菜单栏 22pt 高,Retina 是 2x —— 画 44px 再按 22pt
+    /// 逻辑尺寸贴上去,非 Retina 屏由系统降采样。与 Win32 侧按 `SM_CXSMICON` 取尺寸
+    /// 同理,只是这边的「小图标」尺寸是平台固定值。
+    const ICON_PX: u32 = 44;
+    /// 贴图用的逻辑尺寸(pt)。
+    const ICON_PT: f64 = 22.0;
+
+    // ─── RGBA → NSImage ─────────────────────────────────────
+
+    /// 把 [`compose_frame_rgba`] 出的缓冲变成 `NSImage`。
+    ///
+    /// **不设 template**:模板图会被系统按菜单栏明暗重新着色,而这三盏灯的颜色
+    /// 本身就是语义(黄/蓝/绿),被染成单色就全废了。
+    fn image_from_rgba(rgba: &[u8], size: u32) -> Option<Retained<NSImage>> {
+        let mut ptr = rgba.as_ptr() as *mut u8;
+        // SAFETY: `planes` 指向本函数入参那块存活的缓冲;宽高/行距/位深与
+        // `compose_frame_rgba` 的输出格式(RGBA8,4 字节/像素)逐项对应。
+        // NSBitmapImageRep 在 init 时把像素拷走,不持有这个指针。
+        let rep = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                &mut ptr,
+                size as isize,
+                size as isize,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                (size * 4) as isize,
+                32,
+            )
+        }?;
+        let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(ICON_PT, ICON_PT));
+        image.addRepresentation(&rep);
+        Some(image)
+    }
+
+    // ─── target-action 载体 ─────────────────────────────────
+
+    struct TargetIvars {
+        events: UnboundedSender<TrayEvent>,
+        /// 菜单项 tag → 项目 id。菜单每次重建,tag 就是当次的下标。
+        ids: RefCell<Vec<String>>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        // 类名进的是 ObjC 运行时的**全局**命名空间,加前缀避免撞名
+        #[name = "MiniTermTrayTarget"]
+        #[ivars = TargetIvars]
+        struct TrayTarget;
+
+        impl TrayTarget {
+            /// 菜单首项「打开 mini-term」。
+            #[unsafe(method(miniTermTrayOpen:))]
+            fn on_open(&self, _sender: &AnyObject) {
+                activate_app();
+                let _ = self.ivars().events.unbounded_send(TrayEvent::Clicked);
+            }
+
+            /// 项目条目。id 按 tag 回查,查不到(菜单与快照赛跑)就什么都不做。
+            #[unsafe(method(miniTermTrayItem:))]
+            fn on_item(&self, sender: &AnyObject) {
+                // SAFETY: sender 是发起本次 action 的 NSMenuItem,`tag` 是它的固有属性
+                let tag: isize = unsafe { msg_send![sender, tag] };
+                let Ok(index) = usize::try_from(tag) else {
+                    return;
+                };
+                let Some(id) = self.ivars().ids.borrow().get(index).cloned() else {
+                    return;
+                };
+                activate_app();
+                let _ = self
+                    .ivars()
+                    .events
+                    .unbounded_send(TrayEvent::ProjectClicked(id));
+            }
+        }
+
+        unsafe impl NSObjectProtocol for TrayTarget {}
+    );
+
+    impl TrayTarget {
+        fn new(mtm: MainThreadMarker, events: UnboundedSender<TrayEvent>) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(TargetIvars {
+                events,
+                ids: RefCell::new(Vec::new()),
+            });
+            // SAFETY: 标准的 `[[Self alloc] init]`,父类是 NSObject
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// 把应用切到前台。两条 action 共用 —— 事件送到主线程时窗口就该已经在前面了。
+    fn activate_app() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        // 新的 `activate()` 要 macOS 14+,而 `Info.plist` 的 LSMinimumSystemVersion
+        // 是 **11.0** —— 在 11~13 上调它是 unrecognized selector,直接崩。这个老
+        // 接口虽被标记「将来会废弃」,却是覆盖得住部署目标的那一个。
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+
+    // ─── 状态 ───────────────────────────────────────────────
+
+    struct State {
+        item: Retained<NSStatusItem>,
+        target: Retained<TrayTarget>,
+        snapshot: TraySnapshot,
+        blink: Blink,
+    }
+
+    /// 按当前快照与闪烁相位重画图标。
+    fn redraw(st: &mut State, mtm: MainThreadMarker) {
+        let colors = active_colors(st.snapshot.lamps);
+        let (color, dim) = frame_color(
+            &colors,
+            st.blink.frame,
+            st.blink.blinking(st.snapshot.focused),
+        );
+        let rgba = compose_frame_rgba(ICON_PX, color, dim);
+        let Some(button) = st.item.button(mtm) else {
+            return;
+        };
+        if let Some(image) = image_from_rgba(&rgba, ICON_PX) {
+            button.setImage(Some(&image));
+        }
+    }
+
+    /// 重建菜单。首项固定是「打开」,其后才是项目列表。
+    fn rebuild_menu(st: &mut State, mtm: MainThreadMarker) {
+        let menu = NSMenu::new(mtm);
+
+        let open = NSMenuItem::new(mtm);
+        // SAFETY: 都是 NSMenuItem 的固有属性;target 是本模块自己的 TrayTarget,
+        // 它被 State 强引用,活得比菜单久
+        unsafe {
+            open.setTitle(&NSString::from_str(&t("app", "trayOpen")));
+            open.setTarget(Some(&*st.target));
+            open.setAction(Some(sel!(miniTermTrayOpen:)));
+        }
+        menu.addItem(&open);
+
+        let ids: Vec<String> = st.snapshot.projects.iter().map(|e| e.id.clone()).collect();
+        if !ids.is_empty() {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        for (index, entry) in st.snapshot.projects.iter().enumerate() {
+            let mi = NSMenuItem::new(mtm);
+            // SAFETY: 同上;tag 存下标,action 里按它回查 id
+            unsafe {
+                mi.setTitle(&NSString::from_str(&entry.label));
+                mi.setTarget(Some(&*st.target));
+                mi.setAction(Some(sel!(miniTermTrayItem:)));
+                mi.setTag(index as isize);
+            }
+            menu.addItem(&mi);
+        }
+        *st.target.ivars().ids.borrow_mut() = ids;
+        st.item.setMenu(Some(&menu));
+    }
+
+    /// 闪烁一帧。安静 / 聚焦 / 已定格 / 开关关掉时 [`Blink::tick`] 自己会拒绝推帧。
+    fn tick(state: &Rc<RefCell<State>>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let mut st = state.borrow_mut();
+        let colors = active_colors(st.snapshot.lamps).len();
+        let (enabled, focused) = (st.snapshot.enabled, st.snapshot.focused);
+        if !st.blink.tick(colors, enabled, focused) {
+            return;
+        }
+        redraw(&mut st, mtm);
+    }
+
+    // ─── 对外 ───────────────────────────────────────────────
+
+    pub struct TrayHandle {
+        state: Rc<RefCell<State>>,
+        timer: Retained<NSTimer>,
+    }
+
+    pub fn start(_window: &gpui::Window, events: UnboundedSender<TrayEvent>) -> Option<TrayHandle> {
+        let mtm = MainThreadMarker::new()?;
+        let bar = NSStatusBar::systemStatusBar();
+        let item = bar.statusItemWithLength(NSVariableStatusItemLength);
+        let target = TrayTarget::new(mtm, events);
+
+        let state = Rc::new(RefCell::new(State {
+            item,
+            target,
+            snapshot: TraySnapshot::default(),
+            blink: Blink::default(),
+        }));
+
+        // 定时器拿 **Weak**:scheduled 之后 runloop 一直持有 block,强引用会让 State
+        // 永远活着(Drop 里虽然 invalidate,但那要求 handle 先被 drop —— 循环成立时
+        // 它永远不会被 drop)。
+        let weak = Rc::downgrade(&state);
+        let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+            if let Some(state) = weak.upgrade() {
+                tick(&state);
+            }
+        });
+        // SAFETY: block 签名与 NSTimer 期望的 `^(NSTimer *)` 一致
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                f64::from(BLINK_MS) / 1000.0,
+                true,
+                &block,
+            )
+        };
+
+        Some(TrayHandle { state, timer })
+    }
+
+    impl TrayHandle {
+        pub fn push(&self, snapshot: TraySnapshot) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let mut st = self.state.borrow_mut();
+
+            // 灯色/焦点变了就重开一轮闪烁(与 Win32 侧 WM_TRAY_SYNC 的处置同源)
+            if st.snapshot.lamps != snapshot.lamps || st.snapshot.focused != snapshot.focused {
+                st.blink.reset();
+            }
+            st.snapshot = snapshot;
+
+            st.item.setVisible(st.snapshot.enabled);
+            if !st.snapshot.enabled {
+                return;
+            }
+
+            rebuild_menu(&mut st, mtm);
+            if let Some(button) = st.item.button(mtm) {
+                // 先绑住 `Retained`:直接把 `NSString::from_str(..)` 的结果借给
+                // `setToolTip` 的话,那个临时值在调用完成前就被释放了。
+                // 空串按「不设 tooltip」处理,与 [`TraySnapshot::tooltip`] 的文档一致。
+                let tip = (!st.snapshot.tooltip.is_empty())
+                    .then(|| NSString::from_str(&st.snapshot.tooltip));
+                button.setToolTip(tip.as_deref());
+            }
+            redraw(&mut st, mtm);
+        }
+    }
+
+    impl Drop for TrayHandle {
+        fn drop(&mut self) {
+            // 顺序要紧:先停表再摘图标 —— 反过来的话中间那一拍可能画到一个
+            // 已经从状态栏摘掉的 item 上
+            self.timer.invalidate();
+            if MainThreadMarker::new().is_some() {
+                let bar = NSStatusBar::systemStatusBar();
+                bar.removeStatusItem(&self.state.borrow().item);
+            }
+        }
     }
 }
 
@@ -519,7 +829,8 @@ mod platform {
         }
     }
 
-    pub fn start(main_hwnd: isize, events: UnboundedSender<TrayEvent>) -> Option<TrayHandle> {
+    pub fn start(window: &gpui::Window, events: UnboundedSender<TrayEvent>) -> Option<TrayHandle> {
+        let main_hwnd = super::main_window_handle(window)?;
         let (tx, rx) = channel::<Command>();
         let (ready_tx, ready_rx) = channel::<isize>();
         let thread = std::thread::Builder::new()

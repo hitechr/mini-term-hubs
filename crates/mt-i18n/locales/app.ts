@@ -52,6 +52,7 @@ export const app = {
     },
     trayWorking: "{count} 个处理中",
     trayDone: "{count} 个已完成",
+    trayOpen: "打开 mini-term",
     emptyState: "请先在中间栏添加项目",
     firstRun: {
       title: "还没有项目",
@@ -116,6 +117,7 @@ export const app = {
     },
     trayWorking: "{count} working",
     trayDone: "{count} completed",
+    trayOpen: "Open mini-term",
     emptyState: "Add a project in the middle panel first",
     firstRun: {
       title: "No projects yet",

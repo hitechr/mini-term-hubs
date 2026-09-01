@@ -4250,6 +4250,7 @@ name = "mt-app"
 version = "1.2.2"
 dependencies = [
  "anyhow",
+ "block2",
  "chrono",
  "dirs 6.0.0",
  "futures",

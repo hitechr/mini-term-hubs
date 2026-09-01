@@ -12,9 +12,9 @@ use crate::Namespace;
 /// 命名空间总数（生成器对账用，测试断言防漂移）
 pub const NAMESPACE_COUNT: usize = 32;
 /// 中文条目总数
-pub const ZH_ENTRY_COUNT: usize = 842;
+pub const ZH_ENTRY_COUNT: usize = 843;
 /// 英文条目总数
-pub const EN_ENTRY_COUNT: usize = 842;
+pub const EN_ENTRY_COUNT: usize = 843;
 
 #[rustfmt::skip]
 static APP_ZH: &[(&str, &str)] = &[
@@ -56,6 +56,7 @@ static APP_ZH: &[(&str, &str)] = &[
     ("titleBar.status.working", "AI 正在处理，点击前往"),
     ("trayAttention", "{count} 个待确认"),
     ("trayDone", "{count} 个已完成"),
+    ("trayOpen", "打开 mini-term"),
     ("trayStatus.attention", "待确认"),
     ("trayStatus.done", "已完成"),
     ("trayStatus.idle", "AI 空闲"),
@@ -105,6 +106,7 @@ static APP_EN: &[(&str, &str)] = &[
     ("titleBar.status.working", "AI is working — click to jump there"),
     ("trayAttention", "{count} awaiting confirmation"),
     ("trayDone", "{count} completed"),
+    ("trayOpen", "Open mini-term"),
     ("trayStatus.attention", "Awaiting confirmation"),
     ("trayStatus.done", "Completed"),
     ("trayStatus.idle", "AI idle"),

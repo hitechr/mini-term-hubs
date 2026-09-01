@@ -103,12 +103,14 @@ reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features =
 gpui = { workspace = true, features = ["x11", "wayland"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Dock 跳动(NSApplication::requestUserAttention)与提示音(NSSound / NSBeep)。
-# 版本跟随 gpui 的 macOS 后端已经在用的那两个,不给依赖树引入第二份 objc2。
-# feature 按类名门控,只开真正用到的四个。
+# Dock 跳动(NSApplication::requestUserAttention)、提示音(NSSound / NSBeep)
+# 与状态栏图标(NSStatusItem)。版本跟随 gpui 的 macOS 后端已经在用的那几个,
+# 不给依赖树引入第二份 objc2。feature 按类名门控,只开真正用到的。
 objc2 = "0.6"
+# 托盘闪烁的 NSTimer 走 block 版接口,免得为一个定时器再定义一个 ObjC 类
+block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
-    # NSApplication:requestUserAttention / isActive
+    # NSApplication:requestUserAttention / isActive / activateIgnoringOtherApps
     "NSApplication",
     # 提示音
     "NSSound",
@@ -116,8 +118,32 @@ objc2-app-kit = { version = "0.3", features = [
     # 启用,仍显式列出:用到了它的符号就该声明,免得上游哪天改了 feature 传递
     # 关系,兜底那一行突然编不过。
     "NSGraphics",
+    # 状态栏图标本体与它的按钮(按钮的父类链要一起开)
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSButton",
+    "NSControl",
+    "NSView",
+    "NSResponder",
+    # 托盘菜单
+    "NSMenu",
+    "NSMenuItem",
+    # 逐帧图标:RGBA 缓冲 → NSBitmapImageRep → NSImage
+    "NSImage",
+    "NSImageRep",
+    "NSBitmapImageRep",
 ] }
-objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSData",
+    "NSString",
+    # NSSize / NSPoint
+    "NSGeometry",
+    # 闪烁定时器(NSDate / NSRunLoop 是它的伴生类型)
+    "NSTimer",
+    "NSDate",
+    "NSRunLoop",
+] }
 
 [target.'cfg(windows)'.dependencies]
 # 任务栏闪烁(FlashWindowEx)、提示音(MessageBeep / PlaySoundW)与系统托盘。
