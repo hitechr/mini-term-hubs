@@ -330,6 +330,13 @@ pub struct SavedPane {
     /// 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// 用户给这个终端起的名字(F2 / 右键改名 / 移动端改名)。
+    ///
+    /// 与 [`SavedTab::custom_title`] 同一个写法 —— 面板名一直是存的,终端名此前
+    /// 漏了,于是同一个交互重启后一个还在、一个回落 shell 名。没起过名的 pane
+    /// 不写这个键,旧 `layout.db` 少这个字段也照常读。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
     /// 退出时该 pane 正在跑的 AI 会话(hook 上报的精确身份)。
     /// 重启恢复布局后据此写入 `claude --resume` / `codex resume` 续接会话。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1483,6 +1490,7 @@ mod tests {
                             panes: vec![SavedPane {
                                 shell_name: "cmd".into(),
                                 cwd: None,
+                                custom_title: None,
                                 ai_session: None,
                             }],
                         },
@@ -1555,6 +1563,7 @@ mod tests {
                             panes: vec![SavedPane {
                                 shell_name: "cmd".into(),
                                 cwd: None,
+                                custom_title: None,
                                 ai_session: None,
                             }],
                         },
@@ -1563,6 +1572,7 @@ mod tests {
                             panes: vec![SavedPane {
                                 shell_name: "powershell".into(),
                                 cwd: None,
+                                custom_title: None,
                                 ai_session: None,
                             }],
                         },

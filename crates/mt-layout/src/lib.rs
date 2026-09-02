@@ -463,6 +463,7 @@ mod tests {
                             panes: vec![SavedPane {
                                 shell_name: shell.into(),
                                 cwd: None,
+                                custom_title: None,
                                 ai_session: None,
                             }],
                         },
@@ -471,6 +472,7 @@ mod tests {
                             panes: vec![SavedPane {
                                 shell_name: shell.into(),
                                 cwd: Some("D:/x".into()),
+                                custom_title: None,
                                 ai_session: None,
                             }],
                         },

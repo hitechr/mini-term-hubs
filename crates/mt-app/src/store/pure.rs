@@ -254,27 +254,30 @@ pub(super) fn next_maximized(current: Option<&str>, requested: Option<&str>) -> 
 }
 
 // 拆分前是模块私有;现在调用点(`store::prefs`)是兄弟模块,升到 `pub(super)`。
+//
+// 返回**改动落在哪个项目**(没改动 / 没找到都是 `None`)—— 调用方要拿它去存布局,
+// 而移动端那条路只认得 pane_id、不知道项目。
 pub(super) fn rename_pane_in_states(
     states: &mut HashMap<String, ProjectState>,
     pane_id: &str,
     title: &str,
-) -> bool {
+) -> Option<String> {
     let next = if title.is_empty() {
         None
     } else {
         Some(title.to_string())
     };
-    for state in states.values_mut() {
+    for (project_id, state) in states.iter_mut() {
         let Some(pane) = state.pane_mut(pane_id) else {
             continue;
         };
         if pane.custom_title == next {
-            return false;
+            return None;
         }
         pane.custom_title = next;
-        return true;
+        return Some(project_id.clone());
     }
-    false
+    None
 }
 
 /// `pty_id` → `(project_id, pane_id)`。
@@ -837,7 +840,7 @@ mod tests {
     #[test]
     fn 改会话名按_pane_id_跨项目定位() {
         let (mut states, _a_id, b_id) = two_projects();
-        assert!(rename_pane_in_states(&mut states, &b_id, "手机改的名"));
+        assert!(rename_pane_in_states(&mut states, &b_id, "手机改的名").is_some());
         assert_eq!(title_of(&states, &b_id).as_deref(), Some("手机改的名"));
     }
 
@@ -845,18 +848,18 @@ mod tests {
     #[test]
     fn 改会话名传空串等于清除自定义名() {
         let (mut states, a_id, _) = two_projects();
-        assert!(rename_pane_in_states(&mut states, &a_id, "X"));
-        assert!(rename_pane_in_states(&mut states, &a_id, ""));
+        assert!(rename_pane_in_states(&mut states, &a_id, "X").is_some());
+        assert!(rename_pane_in_states(&mut states, &a_id, "").is_some());
         assert_eq!(title_of(&states, &a_id), None);
         // 已经是默认名了,再清一次不算改动(省掉一次无谓的重绘)
-        assert!(!rename_pane_in_states(&mut states, &a_id, ""));
+        assert!(rename_pane_in_states(&mut states, &a_id, "").is_none());
     }
 
     /// 一个都没命中:什么都不改,也不报错(pane 可能刚被关掉)。
     #[test]
     fn 改会话名未命中时什么都不改() {
         let (mut states, a_id, b_id) = two_projects();
-        assert!(!rename_pane_in_states(&mut states, "pane-不存在", "X"));
+        assert!(rename_pane_in_states(&mut states, "pane-不存在", "X").is_none());
         assert_eq!(title_of(&states, &a_id), None);
         assert_eq!(title_of(&states, &b_id), None);
     }
@@ -865,8 +868,8 @@ mod tests {
     #[test]
     fn 改会话名同名时不算改动() {
         let (mut states, a_id, _) = two_projects();
-        assert!(rename_pane_in_states(&mut states, &a_id, "同一个名"));
-        assert!(!rename_pane_in_states(&mut states, &a_id, "同一个名"));
+        assert!(rename_pane_in_states(&mut states, &a_id, "同一个名").is_some());
+        assert!(rename_pane_in_states(&mut states, &a_id, "同一个名").is_none());
     }
 
     #[test]

@@ -40,6 +40,7 @@ fn serialize_node(node: &SplitNode) -> SavedSplitNode {
                 .map(|p| SavedPane {
                     shell_name: p.shell_name.clone(),
                     cwd: p.cwd.clone(),
+                    custom_title: p.custom_title.clone(),
                     ai_session: p.ai_session.as_ref().map(|s| SavedAiSession {
                         agent: s.agent.clone(),
                         cwd: s.cwd.clone(),
@@ -105,6 +106,7 @@ fn restore_node(saved: &SavedSplitNode, config: &AppConfig) -> Option<SplitNode>
                 };
                 let mut p = PaneState::new(shell_name);
                 p.cwd = sp.cwd.clone();
+                p.custom_title = sp.custom_title.clone();
                 p.ai_session = sp.ai_session.as_ref().map(|s| AiSessionRef {
                     agent: s.agent.clone(),
                     session_id: s.session_id.clone(),
@@ -260,6 +262,45 @@ mod tests {
         assert_eq!(active.as_deref(), Some(back[1].id.as_str()), "活动面板是第 1 个");
     }
 
+    /// pane 的自定义名随布局往返 —— 改完名重启不该回落 shell 名。
+    ///
+    /// 此前 `SavedPane` 里没有这个字段,于是同一个「改名」交互,改**面板**能活过
+    /// 重启(`SavedTab::custom_title` 一直是存的)、改**终端**不能。分屏一多全是
+    /// 同名 shell,认不出谁是谁。
+    #[test]
+    fn pane_自定义名往返() {
+        let mut pane = PaneState::new("cmd");
+        pane.custom_title = Some("构建日志".into());
+        let panels = one_panel(SplitNode::leaf(pane));
+
+        let saved = serialize_layout(&panels, 0);
+        let SavedSplitNode::Leaf { panes, .. } = &saved.tabs[0].split_layout else {
+            panic!("应当是叶子");
+        };
+        assert_eq!(
+            panes[0].custom_title.as_deref(),
+            Some("构建日志"),
+            "得先落进磁盘格式"
+        );
+
+        let back = restore_first(&saved, &config());
+        assert_eq!(back.panes()[0].custom_title.as_deref(), Some("构建日志"));
+    }
+
+    /// 没起过名的 pane 不写这个键,旧数据缺这个字段也照常读。
+    #[test]
+    fn pane_没起名时不写这个键() {
+        let saved = serialize_layout(&one_panel(leaf("cmd")), 0);
+        let json = serde_json::to_string(&saved).expect("序列化");
+        assert!(
+            !json.contains("customTitle"),
+            "没起过名不该写这个键,免得给旧版本塞没用的字段:{json}"
+        );
+
+        let back = restore_first(&saved, &config());
+        assert_eq!(back.panes()[0].custom_title, None);
+    }
+
     /// 活动下标越界(手改/旧数据)→ 回落第一个面板,不 panic。
     #[test]
     fn 活动下标越界回落第一个面板() {
@@ -279,6 +320,7 @@ mod tests {
                     panes: vec![SavedPane {
                         shell_name: "nushell(已删)".into(),
                         cwd: None,
+                        custom_title: None,
                         ai_session: None,
                     }],
                 },
@@ -300,6 +342,7 @@ mod tests {
                 panes: vec![SavedPane {
                     shell_name: name.into(),
                     cwd: None,
+                    custom_title: None,
                     ai_session: None,
                 }],
             },
@@ -324,6 +367,7 @@ mod tests {
                     pane: Some(SavedPane {
                         shell_name: "cmd".into(),
                         cwd: Some("D:/x".into()),
+                        custom_title: None,
                         ai_session: None,
                     }),
                     panes: vec![],

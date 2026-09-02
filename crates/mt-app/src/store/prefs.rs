@@ -355,8 +355,9 @@ impl AppStore {
 
     /// 改 tab 标题。空字符串 = 恢复默认(shell 名)。
     ///
-    /// **不落盘** —— `SavedPane` 里没有这个字段,装机版同样只在运行时保留
-    /// (`serializeSplitNode` 只写 shellName/cwd/aiSession)。磁盘格式一字不改。
+    /// **随布局落盘**:`SavedPane.custom_title` 与面板名(`SavedTab::custom_title`)
+    /// 同一个写法。此前不落盘,于是同一个「改名」交互,改面板能活过重启、改终端
+    /// 不能 —— 分屏一多全是同名 shell,认不出谁是谁。
     pub fn rename_pane(
         &mut self,
         project_id: &str,
@@ -365,6 +366,7 @@ impl AppStore {
         cx: &mut Context<Self>,
     ) {
         let title = title.trim();
+        let mut changed = false;
         if let Some(state) = self.project_states.get_mut(project_id)
             && let Some(pane) = state.pane_mut(pane_id)
         {
@@ -373,6 +375,10 @@ impl AppStore {
             } else {
                 Some(title.to_string())
             };
+            changed = true;
+        }
+        if changed {
+            self.save_project_layout_soon(project_id, cx);
             cx.notify();
         }
     }
@@ -380,15 +386,17 @@ impl AppStore {
     /// 移动端改会话名:按 `pane_id` **全局**定位 —— 移动端只认得 pane,
     /// 不知道它挂在哪个项目下(`src/store.ts:1163-1180`)。
     ///
-    /// 空串 = 清除自定义名、回落 shell 名。**不落盘**:`SavedPane` 里没有
-    /// `customTitle`,AI 会话本来也活不过重启。
+    /// 空串 = 清除自定义名、回落 shell 名。**随布局落盘** —— 与 [`Self::rename_pane`]
+    /// 同一条口径:名字既然进了磁盘格式,哪条路改的都得存,否则存不存全看有没有
+    /// 别的操作顺带触发过保存。
     ///
     /// 与 [`Self::rename_pane`] 并存:那条是 F2 / 右键改名(知道项目、要 trim),
     /// 这条是移动端来的 —— 标题**已经在 mt-relay 里收敛过**
     /// (trim + 去控制字符 + 64 字符限长,`relay.rs:709-716`),
     /// 这里不再叠加任何收敛,否则两处限长会打架。
     pub fn rename_pane_by_id(&mut self, pane_id: &str, title: &str, cx: &mut Context<Self>) {
-        if rename_pane_in_states(&mut self.project_states, pane_id, title) {
+        if let Some(project_id) = rename_pane_in_states(&mut self.project_states, pane_id, title) {
+            self.save_project_layout_soon(&project_id, cx);
             cx.notify();
         }
     }
