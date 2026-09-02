@@ -62,9 +62,9 @@ const BLINK_MS: u32 = 600;
 const BURST_FRAMES: usize = 6;
 /// 暗帧的 alpha 系数。
 const DIM: f32 = 0.35;
-/// 圆点半径与画布边长之比。装机版是 36px 画布 / 13px 半径的字面量,
-/// Windows 侧画布跟着 `SM_CXSMICON` 走(16px@100%),只能改成比例式。
-const RADIUS_RATIO: f32 = 13.0 / 36.0;
+/// 笔画半宽与画布边长之比。`>` 的笔画;16px 画布上约 2.7px 宽,
+/// 再细就在 Win32 的 100% DPI 下糊成一片。
+const STROKE_RATIO: f32 = 0.085;
 
 // Apple 系统色板(装机版是 macOS 菜单栏优先设计,颜色照搬)
 const GRAY: [u8; 3] = [0x8E, 0x8E, 0x93];
@@ -236,22 +236,56 @@ fn frame_color(colors: &[[u8; 3]], frame: usize, blinking: bool) -> ([u8; 3], bo
     }
 }
 
-/// 画单个圆点(托盘永远只占一个灯位;多状态靠交替变色表达)。
+/// 点到线段的最短距离(笔画抗锯齿用的距离场)。
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len_sq = dx * dx + dy * dy;
+    // 退化成一个点时按点距算,不让除法炸掉
+    let t = if len_sq <= f32::EPSILON {
+        0.0
+    } else {
+        (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0)
+    };
+    let (nx, ny) = (ax + t * dx, ay + t * dy);
+    ((px - nx).powi(2) + (py - ny).powi(2)).sqrt()
+}
+
+/// 画状态灯:一个 `>` 提示符(托盘永远只占一个灯位;多状态靠交替变色表达)。
 ///
-/// 实心圆 + 1px 软边抗锯齿,无边框无描边;返回 **RGBA**(Win32 那一层再转
-/// 预乘 BGRA)。`dim` = 暗帧(alpha 压到 [`DIM`],用于单状态呼吸闪烁)。
+/// # 为什么不是纯色圆点
+///
+/// 原先画的是实心圆。安静态(灰)时,菜单栏里就是一个突兀的灰点 —— 旁边一排
+/// 应用图标都有形状,只有它是个圆疙瘩,像坏掉的指示灯而不像一个应用。
+/// 改画应用图标的主视觉 `>` 提示符(`docs/icon.png` 里那个橙色符号),
+/// 灰态也有辨识度,一眼看得出是终端。
+///
+/// 颜色语义**一点没变**:整个笔画就是状态色(黄/蓝/绿/灰),
+/// 与主窗口 StatusDot 仍按语义对齐。
+///
+/// 两条线段拼成折线,按到线段的距离做 1px 软边抗锯齿,无边框无描边;
+/// 返回 **RGBA**(Win32 那一层再转预乘 BGRA)。
+/// `dim` = 暗帧(alpha 压到 [`DIM`],用于单状态呼吸闪烁)。
+///
+/// 几何全按 `size` 取比例 —— Win32 画布跟着 `SM_CXSMICON` 走(16px@100%),
+/// macOS 是固定的 44px(22pt@2x),同一份代码要在两边都画得出来。
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn compose_frame_rgba(size: u32, color: [u8; 3], dim: bool) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
-    let radius = size as f32 * RADIUS_RATIO;
-    let center = size as f32 / 2.0 - 0.5;
+    let s = size as f32;
+    let half_stroke = s * STROKE_RATIO;
+    // `>` 的三个折点:左上 → 右中(尖端)→ 左下。水平范围 0.32~0.68 使整体居中。
+    let (ax, ay) = (s * 0.32, s * 0.30);
+    let (bx, by) = (s * 0.68, s * 0.50);
+    let (cx, cy) = (s * 0.32, s * 0.70);
     for y in 0..size {
         for x in 0..size {
-            let dx = x as f32 - center;
-            let dy = y as f32 - center;
-            let dist = (dx * dx + dy * dy).sqrt();
+            // 采样点取像素中心
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let dist = dist_to_segment(px, py, ax, ay, bx, by)
+                .min(dist_to_segment(px, py, bx, by, cx, cy));
             // 1px 软边抗锯齿
-            let mut alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
+            let mut alpha = (half_stroke + 0.5 - dist).clamp(0.0, 1.0);
             if dim {
                 alpha *= DIM;
             }
@@ -1221,7 +1255,7 @@ mod platform {
         }
     }
 
-    /// 把 RGBA 圆点变成一个 32bpp 带 alpha 的 HICON。
+    /// 把 RGBA 帧变成一个 32bpp 带 alpha 的 HICON。
     ///
     /// shell 走 `AlphaBlend` 画托盘图标,颜色位图必须是**预乘** BGRA;
     /// 掩码位图(1bpp)对 32bpp 图标基本只是形式要求,但不能省、也不能不清零
@@ -1536,18 +1570,36 @@ mod tests {
         assert!(!blink.settled);
     }
 
-    /// 画布:圆心是纯色不透明,四角在圆外必须完全透明。
+    /// 画布:笔画覆盖中心(`>` 够粗,开口处也被盖住),四角必须完全透明。
     #[test]
-    fn 圆点画在画布正中且四角透明() {
+    fn 提示符画在画布正中且四角透明() {
         const SIZE: u32 = 16;
         let rgba = compose_frame_rgba(SIZE, GREEN, false);
         assert_eq!(rgba.len(), (SIZE * SIZE * 4) as usize);
         let center = ((SIZE / 2) * SIZE + SIZE / 2) as usize * 4;
         assert_eq!(&rgba[center..center + 3], &GREEN);
         assert_eq!(rgba[center + 3], 255);
-        // 左上角、右下角都在半径之外
+        // 四角离笔画很远
         assert_eq!(rgba[3], 0);
         assert_eq!(rgba[(SIZE * SIZE * 4 - 1) as usize], 0);
+    }
+
+    /// 画的确实是 `>` 而不是圆:`>` 的**开口**(左侧中部)必须是空的。
+    ///
+    /// 这一条是形状的真正判据 —— 上面那个「中心实心 + 四角透明」圆点同样满足,
+    /// 单靠它换回实心圆也测不出来。
+    #[test]
+    fn 提示符左侧开口是空的() {
+        for size in [16u32, 20, 24, 32, 44] {
+            let rgba = compose_frame_rgba(size, GREEN, false);
+            let s = size as f32;
+            // 折线的水平起点是 0.32s、尖端 0.68s;取 0.36s 处的中线,
+            // 它在两条笔画之间的开口里(而半径 0.36s 的圆会盖住这里)
+            let x = (s * 0.36) as u32;
+            let y = (s * 0.50) as u32;
+            let idx = ((y * size + x) * 4) as usize;
+            assert_eq!(rgba[idx + 3], 0, "size={size} 开口处不该有笔画");
+        }
     }
 
     /// 暗帧只压 alpha,不改颜色。
@@ -1563,10 +1615,11 @@ mod tests {
         assert_eq!(&dim[center..center + 3], &YELLOW);
     }
 
-    /// 画布跟着 `SM_CXSMICON` 走,任何尺寸都得画出一个居中的圆。
+    /// 画布尺寸两边不同(Win32 跟 `SM_CXSMICON`,macOS 固定 44px),
+    /// 几何全按比例取,任何尺寸都得画得出笔画。
     #[test]
-    fn 不同画布尺寸都居中() {
-        for size in [16u32, 20, 24, 32] {
+    fn 不同画布尺寸都画得出笔画() {
+        for size in [16u32, 20, 24, 32, 44] {
             let rgba = compose_frame_rgba(size, BLUE, false);
             let center = ((size / 2) * size + size / 2) as usize * 4;
             assert_eq!(&rgba[center..center + 3], &BLUE, "size={size}");
