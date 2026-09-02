@@ -7,7 +7,7 @@
 //! 黄 = 有 pane 需要用户确认(授权/输入请求,含 error 异常)
 //! 蓝 = 有 pane 处理中(ai-working,含 API 重试)
 //! 绿 = 有已完成且未读的回答(激活主窗口即清除)
-//! 灰 = 全部安静(静止不闪)
+//! 白 = 全部安静(静止不闪)
 //! ```
 //!
 //! 静止时停在最高优先级色(黄>蓝>绿)。闪烁三档:**聚焦不闪**;失焦多状态 =
@@ -74,20 +74,15 @@ const FRAME_RADIUS: f32 = 0.16;
 /// 描边线宽的一半。
 const FRAME_STROKE: f32 = 0.04;
 
-/// 安静(灰)态下 `>` 保持全亮的帧数,之后开始淡出。
-const IDLE_HOLD_FRAMES: usize = 3;
-/// 淡出用掉的帧数(约 3s)。淡完只剩外框,图标不会整个消失 ——
-/// 消失会被当成「程序退了」。
-const IDLE_FADE_FRAMES: usize = 5;
-
-// Apple 系统色板(装机版是 macOS 菜单栏优先设计,颜色照搬)
-const GRAY: [u8; 3] = [0x8E, 0x8E, 0x93];
+// Apple 系统色板(装机版是 macOS 菜单栏优先设计,颜色照搬)。
+// 安静态原是系统灰 #8E8E93,在菜单栏上看不出来,改成白。
+const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
 const BLUE: [u8; 3] = [0x0A, 0x84, 0xFF];
 const YELLOW: [u8; 3] = [0xFF, 0xCC, 0x00];
 const GREEN: [u8; 3] = [0x34, 0xC7, 0x59];
 
 // 外框的中性色。macOS 按菜单栏明暗二选一(那边的惯例是单色描边图标);
-// Win32 用中性灰 —— 深浅两种任务栏都看得见,省掉读注册表判主题那一步。
+// Win32 侧与安静态同用白。
 //
 // 三个都只在各自的 `platform` 模块里用,Linux 上那两个模块都不编译 ——
 // 与本文件的画帧纯函数同一道门控。
@@ -96,7 +91,7 @@ const FRAME_LIGHT: [u8; 3] = [0xFF, 0xFF, 0xFF];
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const FRAME_DARK: [u8; 3] = [0x1D, 0x1D, 0x1F];
 #[cfg_attr(not(windows), allow(dead_code))]
-const FRAME_NEUTRAL: [u8; 3] = GRAY;
+const FRAME_NEUTRAL: [u8; 3] = WHITE;
 
 /// 托盘菜单里的档位 emoji(`store.ts:330` 的 `KIND_EMOJI`)。
 pub fn kind_emoji(kind: AiProjectKind) -> &'static str {
@@ -117,7 +112,7 @@ pub struct TrayEntry {
     pub label: String,
 }
 
-/// 三盏灯的亮灭。`false/false/false` = 灰(安静)。
+/// 三盏灯的亮灭。`false/false/false` = 白(安静)。
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Lamps {
     pub attention: bool,
@@ -227,7 +222,7 @@ pub fn build_snapshot(
 
 // ─── 纯函数:灯色与画帧 ──────────────────────────────────────
 
-/// 当前活跃的颜色集合(顺序固定 黄→蓝→绿;灰不在集合里,空 = 灰)。
+/// 当前活跃的颜色集合(顺序固定 黄→蓝→绿;白不在集合里,空 = 白)。
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn active_colors(lamps: Lamps) -> Vec<[u8; 3]> {
     let mut colors = Vec::new();
@@ -250,7 +245,7 @@ fn active_colors(lamps: Lamps) -> Vec<[u8; 3]> {
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn frame_color(colors: &[[u8; 3]], frame: usize, blinking: bool) -> ([u8; 3], bool) {
     match colors.len() {
-        0 => (GRAY, false),
+        0 => (WHITE, false),
         1 => (colors[0], blinking && frame % 2 == 1),
         n => {
             if blinking {
@@ -302,8 +297,8 @@ fn dist_to_round_rect(px: f32, py: f32, cx: f32, cy: f32, half: f32, radius: f32
 /// - **外框**是"这个应用在这儿"的常驻标识,用中性色(`frame`)。macOS 侧按菜单栏
 ///   明暗自适应白/黑 —— 那边的惯例就是单色描边图标;Win32 侧用中性灰,深浅两种
 ///   任务栏都看得见。
-/// - **`>`** 承载状态语义(`chevron`:黄/蓝/绿/灰),与主窗口 StatusDot 按语义对齐。
-///   `chevron_alpha` 同时兼顾暗帧([`DIM`])与安静态淡出([`Blink::idle_alpha`])。
+/// - **`>`** 承载状态语义(`chevron`:黄/蓝/绿/白),与主窗口 StatusDot 按语义对齐。
+///   `chevron_alpha` 是暗帧([`DIM`])用的。
 ///
 /// `frame` 传 `None` 就只画 `>`(留给不需要外框的调用方)。
 ///
@@ -385,24 +380,9 @@ impl Blink {
 
     /// 走一帧。返回**是否需要重绘**。
     ///
-    /// `colors` = 活跃颜色数。三种走法:
-    /// - **安静(colors == 0)**:推进 `>` 的淡出相位。**与焦点无关** —— 没事发生
-    ///   就该安静下去,不管人有没有在看着窗口(闪烁才是「要你注意」,这个不是);
-    /// - 聚焦 / 已定格:不动;
-    /// - 其余:原来的闪烁相位。
+    /// `colors` = 活跃颜色数;安静 / 聚焦 / 已定格 / 开关关掉都不推帧。
     fn tick(&mut self, colors: usize, enabled: bool, focused: bool) -> bool {
-        if !enabled || self.settled {
-            return false;
-        }
-        if colors == 0 {
-            self.frame = self.frame.wrapping_add(1);
-            if self.frame >= IDLE_HOLD_FRAMES + IDLE_FADE_FRAMES {
-                // 淡完了就定格(只剩外框),别再每 600ms 白画一帧
-                self.settled = true;
-            }
-            return true;
-        }
-        if focused {
+        if !enabled || colors == 0 || focused || self.settled {
             return false;
         }
         if colors == 1 && self.frame >= BURST_FRAMES {
@@ -412,17 +392,6 @@ impl Blink {
             self.frame = self.frame.wrapping_add(1);
         }
         true
-    }
-
-    /// 安静态下 `>` 的不透明度:前 [`IDLE_HOLD_FRAMES`] 帧全亮,之后线性淡到 0。
-    ///
-    /// 只在 `colors == 0` 时有意义 —— 有状态时 `>` 一律全亮(明暗由暗帧管)。
-    fn idle_alpha(&self) -> f32 {
-        if self.frame <= IDLE_HOLD_FRAMES {
-            return 1.0;
-        }
-        let faded = (self.frame - IDLE_HOLD_FRAMES) as f32 / IDLE_FADE_FRAMES as f32;
-        (1.0 - faded).clamp(0.0, 1.0)
     }
 
     /// 现在处于「该闪」的状态吗(聚焦或已定格都算静止)。
@@ -728,11 +697,10 @@ mod platform {
         } else {
             FRAME_DARK
         };
-        // 安静态:`>` **与外框同色**再逐帧淡出 —— [`frame_color`] 给的那个系统灰
-        // (`#8E8E93`)在菜单栏上几乎看不出来,淡出前那几秒等于一个空框。
-        // 有状态时才用状态色,暗帧压到 DIM。
+        // 安静态:`>` **与外框同色**、全亮、不闪(半透明白压在深色菜单栏上
+        // 渲染出来就是灰,所以不做淡出)。有状态时才用状态色,暗帧压到 DIM。
         let (chevron, chevron_alpha) = if colors.is_empty() {
-            (frame, st.blink.idle_alpha())
+            (frame, 1.0)
         } else if dim {
             (color, DIM)
         } else {
@@ -1188,10 +1156,10 @@ mod platform {
             let colors = active_colors(self.lamps);
             let blinking = self.blink.blinking(self.focused);
             let (color, dim) = frame_color(&colors, self.blink.frame, blinking);
-            // 安静态:`>` **与外框同色**再逐帧淡出(理由同 macOS 侧那段注释 ——
-            // 系统灰在托盘背景上看不出来);有状态才用状态色,暗帧压到 DIM
+            // 安静态:`>` **与外框同色**、全亮、不闪(理由同 macOS 侧那段注释);
+            // 有状态才用状态色,暗帧压到 DIM
             let (chevron, chevron_alpha) = if colors.is_empty() {
-                (FRAME_NEUTRAL, self.blink.idle_alpha())
+                (FRAME_NEUTRAL, 1.0)
             } else if dim {
                 (color, DIM)
             } else {
@@ -1412,8 +1380,7 @@ mod platform {
     /// 掩码位图(1bpp)对 32bpp 图标基本只是形式要求,但不能省、也不能不清零
     /// (`CreateBitmap` 的初始内容是未定义的)。
     fn make_icon(size: i32, color: [u8; 3], chevron_alpha: f32) -> Option<OwnedIcon> {
-        // 外框用中性灰:深浅两种任务栏都看得见,不必去读
-        // `Themes\Personalize\SystemUsesLightTheme` 判主题
+        // 外框用白(与安静态的 `>` 同色)
         let rgba = compose_frame_rgba(size as u32, color, chevron_alpha, Some(FRAME_NEUTRAL));
         let pixels = (size * size) as usize;
 
@@ -1674,8 +1641,8 @@ mod tests {
 
     #[test]
     fn 单灯位的帧色语义() {
-        // 安静 → 灰,不闪
-        assert_eq!(frame_color(&[], 3, true), (GRAY, false));
+        // 安静 → 白,不闪
+        assert_eq!(frame_color(&[], 3, true), (WHITE, false));
         // 单状态闪烁:偶帧亮奇帧暗;静止时恒亮
         assert_eq!(frame_color(&[YELLOW], 0, true), (YELLOW, false));
         assert_eq!(frame_color(&[YELLOW], 1, true), (YELLOW, true));
@@ -1695,6 +1662,7 @@ mod tests {
     fn 闪烁相位三档() {
         let mut blink = Blink::default();
         assert!(!blink.tick(1, true, true), "聚焦时不推帧");
+        assert!(!blink.tick(0, true, false), "安静时不推帧");
         assert!(!blink.tick(1, false, false), "开关关掉不推帧");
 
         // 单状态:BURST_FRAMES 帧之后定格,再也不推
@@ -1720,38 +1688,6 @@ mod tests {
         blink.reset();
         assert_eq!(blink.frame, 0);
         assert!(!blink.settled);
-    }
-
-    /// 安静态:`>` 先亮一会儿再淡到透明,淡完定格(只剩外框)。
-    ///
-    /// **与焦点无关** —— 没事发生就该安静下去,不管人有没有看着窗口。
-    /// 这与闪烁相反:闪烁是「要你注意」,聚焦时自然不闪。
-    #[test]
-    fn 安静态提示符淡出后定格() {
-        let mut blink = Blink::default();
-        assert_eq!(blink.idle_alpha(), 1.0, "刚安静下来时全亮");
-
-        // 保持期:仍是全亮
-        for _ in 0..IDLE_HOLD_FRAMES {
-            assert!(blink.tick(0, true, false), "淡出期间要重绘");
-        }
-        assert_eq!(blink.idle_alpha(), 1.0, "保持期内不该开始淡");
-
-        // 淡出期:逐帧变淡
-        let mut last = blink.idle_alpha();
-        for _ in 0..IDLE_FADE_FRAMES {
-            assert!(blink.tick(0, true, false));
-            let now = blink.idle_alpha();
-            assert!(now < last, "应当逐帧变淡:{last} → {now}");
-            last = now;
-        }
-        assert_eq!(last, 0.0, "淡完是全透明");
-        assert!(blink.settled, "淡完就定格");
-        assert!(!blink.tick(0, true, false), "定格之后不再推帧");
-
-        // 聚焦时照样淡(与闪烁不同)
-        let mut focused = Blink::default();
-        assert!(focused.tick(0, true, true), "安静态的淡出不看焦点");
     }
 
     /// `>` 尖端所在像素的字节下标。几何按 `size` 取比例,任何画布都落在实心笔画上
@@ -1810,8 +1746,7 @@ mod tests {
 
     /// 外框:`frame` 给了就画一圈,给 `None` 就只有 `>`。
     ///
-    /// 外框是「这个应用在这儿」的常驻标识 —— 安静态 `>` 淡光之后全靠它,
-    /// 没有它图标会整个消失,那会被当成程序退了。
+    /// 外框是「这个应用在这儿」的常驻标识,与安静态的 `>` 同色。
     #[test]
     fn 外框可开关且用自己的颜色() {
         const SIZE: u32 = 44;
@@ -1830,22 +1765,6 @@ mod tests {
 
         let without = compose_frame_rgba(SIZE, GREEN, 1.0, None);
         assert_eq!(without[idx + 3], 0, "不给 frame 就不该有框");
-    }
-
-    /// 安静态淡出:`>` 透明之后,外框仍在(图标不会整个消失)。
-    #[test]
-    fn 提示符淡光后外框仍在() {
-        const SIZE: u32 = 44;
-        let rgba = compose_frame_rgba(SIZE, GRAY, 0.0, Some(FRAME_LIGHT));
-
-        // `>` 的尖端所在处应当空了
-        let chev = chevron_tip(SIZE);
-        assert_eq!(rgba[chev + 3], 0, "淡完之后不该还有笔画");
-
-        // 外框仍然实心
-        let fx = (SIZE as f32 * FRAME_INSET) as u32;
-        let frame = (((SIZE / 2) * SIZE + fx) * 4) as usize;
-        assert_eq!(rgba[frame + 3], 255, "外框必须留着");
     }
 
     /// 画布尺寸两边不同(Win32 跟 `SM_CXSMICON`,macOS 固定 44px),
