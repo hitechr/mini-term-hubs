@@ -723,20 +723,22 @@ mod platform {
             st.blink.frame,
             st.blink.blinking(st.snapshot.focused),
         );
-        // 安静态:`>` 淡出,只留外框;有状态:全亮,暗帧时压到 DIM
-        let chevron_alpha = if colors.is_empty() {
-            st.blink.idle_alpha()
-        } else if dim {
-            DIM
-        } else {
-            1.0
-        };
         let frame = if menu_bar_is_dark(&button) {
             FRAME_LIGHT
         } else {
             FRAME_DARK
         };
-        let rgba = compose_frame_rgba(ICON_PX, color, chevron_alpha, Some(frame));
+        // 安静态:`>` **与外框同色**再逐帧淡出 —— [`frame_color`] 给的那个系统灰
+        // (`#8E8E93`)在菜单栏上几乎看不出来,淡出前那几秒等于一个空框。
+        // 有状态时才用状态色,暗帧压到 DIM。
+        let (chevron, chevron_alpha) = if colors.is_empty() {
+            (frame, st.blink.idle_alpha())
+        } else if dim {
+            (color, DIM)
+        } else {
+            (color, 1.0)
+        };
+        let rgba = compose_frame_rgba(ICON_PX, chevron, chevron_alpha, Some(frame));
         if let Some(image) = image_from_rgba(&rgba, ICON_PX) {
             button.setImage(Some(&image));
         }
@@ -1186,15 +1188,16 @@ mod platform {
             let colors = active_colors(self.lamps);
             let blinking = self.blink.blinking(self.focused);
             let (color, dim) = frame_color(&colors, self.blink.frame, blinking);
-            // 安静态:`>` 淡出,只留外框;有状态:全亮,暗帧时压到 DIM
-            let chevron_alpha = if colors.is_empty() {
-                self.blink.idle_alpha()
+            // 安静态:`>` **与外框同色**再逐帧淡出(理由同 macOS 侧那段注释 ——
+            // 系统灰在托盘背景上看不出来);有状态才用状态色,暗帧压到 DIM
+            let (chevron, chevron_alpha) = if colors.is_empty() {
+                (FRAME_NEUTRAL, self.blink.idle_alpha())
             } else if dim {
-                DIM
+                (color, DIM)
             } else {
-                1.0
+                (color, 1.0)
             };
-            let icon = make_icon(self.icon_size, color, chevron_alpha);
+            let icon = make_icon(self.icon_size, chevron, chevron_alpha);
 
             let mut data = self.base_data(hwnd);
             data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
