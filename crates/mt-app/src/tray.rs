@@ -88,8 +88,14 @@ const GREEN: [u8; 3] = [0x34, 0xC7, 0x59];
 
 // 外框的中性色。macOS 按菜单栏明暗二选一(那边的惯例是单色描边图标);
 // Win32 用中性灰 —— 深浅两种任务栏都看得见,省掉读注册表判主题那一步。
+//
+// 三个都只在各自的 `platform` 模块里用,Linux 上那两个模块都不编译 ——
+// 与本文件的画帧纯函数同一道门控。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const FRAME_LIGHT: [u8; 3] = [0xFF, 0xFF, 0xFF];
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const FRAME_DARK: [u8; 3] = [0x1D, 0x1D, 0x1F];
+#[cfg_attr(not(windows), allow(dead_code))]
 const FRAME_NEUTRAL: [u8; 3] = GRAY;
 
 /// 托盘菜单里的档位 emoji(`store.ts:330` 的 `KIND_EMOJI`)。
