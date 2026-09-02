@@ -62,15 +62,35 @@ const BLINK_MS: u32 = 600;
 const BURST_FRAMES: usize = 6;
 /// 暗帧的 alpha 系数。
 const DIM: f32 = 0.35;
-/// 笔画半宽与画布边长之比。`>` 的笔画;16px 画布上约 2.7px 宽,
-/// 再细就在 Win32 的 100% DPI 下糊成一片。
-const STROKE_RATIO: f32 = 0.085;
+/// `>` 笔画半宽与画布边长之比。16px 画布上约 2px 宽,再细就在 Win32 的
+/// 100% DPI 下糊成一片。
+const STROKE_RATIO: f32 = 0.065;
+
+// 外框(那个「终端窗口」轮廓)的几何,均为画布边长之比。
+/// 边框到画布边缘的留白。
+const FRAME_INSET: f32 = 0.06;
+/// 圆角半径。
+const FRAME_RADIUS: f32 = 0.16;
+/// 描边线宽的一半。
+const FRAME_STROKE: f32 = 0.04;
+
+/// 安静(灰)态下 `>` 保持全亮的帧数,之后开始淡出。
+const IDLE_HOLD_FRAMES: usize = 3;
+/// 淡出用掉的帧数(约 3s)。淡完只剩外框,图标不会整个消失 ——
+/// 消失会被当成「程序退了」。
+const IDLE_FADE_FRAMES: usize = 5;
 
 // Apple 系统色板(装机版是 macOS 菜单栏优先设计,颜色照搬)
 const GRAY: [u8; 3] = [0x8E, 0x8E, 0x93];
 const BLUE: [u8; 3] = [0x0A, 0x84, 0xFF];
 const YELLOW: [u8; 3] = [0xFF, 0xCC, 0x00];
 const GREEN: [u8; 3] = [0x34, 0xC7, 0x59];
+
+// 外框的中性色。macOS 按菜单栏明暗二选一(那边的惯例是单色描边图标);
+// Win32 用中性灰 —— 深浅两种任务栏都看得见,省掉读注册表判主题那一步。
+const FRAME_LIGHT: [u8; 3] = [0xFF, 0xFF, 0xFF];
+const FRAME_DARK: [u8; 3] = [0x1D, 0x1D, 0x1F];
+const FRAME_NEUTRAL: [u8; 3] = GRAY;
 
 /// 托盘菜单里的档位 emoji(`store.ts:330` 的 `KIND_EMOJI`)。
 pub fn kind_emoji(kind: AiProjectKind) -> &'static str {
@@ -251,44 +271,81 @@ fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 
     ((px - nx).powi(2) + (py - ny).powi(2)).sqrt()
 }
 
-/// 画状态灯:一个 `>` 提示符(托盘永远只占一个灯位;多状态靠交替变色表达)。
+/// 点到圆角矩形**描边**的距离(0 = 正落在描边中心线上)。
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn dist_to_round_rect(px: f32, py: f32, cx: f32, cy: f32, half: f32, radius: f32) -> f32 {
+    // 标准的圆角矩形 SDF:先折到第一象限,再按「内缩半径的矩形 + 圆角」算
+    let dx = (px - cx).abs() - (half - radius);
+    let dy = (py - cy).abs() - (half - radius);
+    let outside = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
+    let inside = dx.max(dy).min(0.0);
+    // 取绝对值 = 到**边线**的距离(不分内外),描边就是绕这条线加粗
+    (outside + inside - radius).abs()
+}
+
+/// 画状态灯:一个圆角方框 + 框内的 `>` 提示符。
 ///
-/// # 为什么不是纯色圆点
+/// # 为什么是这个形状
 ///
-/// 原先画的是实心圆。安静态(灰)时,菜单栏里就是一个突兀的灰点 —— 旁边一排
-/// 应用图标都有形状,只有它是个圆疙瘩,像坏掉的指示灯而不像一个应用。
-/// 改画应用图标的主视觉 `>` 提示符(`docs/icon.png` 里那个橙色符号),
-/// 灰态也有辨识度,一眼看得出是终端。
+/// 原先画的是纯色圆点。安静态(灰)时,菜单栏里就是一个突兀的灰疙瘩 —— 旁边一排
+/// 应用图标都有轮廓,只有它像个坏掉的指示灯。改画应用图标的主视觉:一个终端
+/// 窗口的方框,里面是那个 `>` 提示符(`docs/icon.png` 里的橙色符号)。
 ///
-/// 颜色语义**一点没变**:整个笔画就是状态色(黄/蓝/绿/灰),
-/// 与主窗口 StatusDot 仍按语义对齐。
+/// # 颜色分工
 ///
-/// 两条线段拼成折线,按到线段的距离做 1px 软边抗锯齿,无边框无描边;
-/// 返回 **RGBA**(Win32 那一层再转预乘 BGRA)。
-/// `dim` = 暗帧(alpha 压到 [`DIM`],用于单状态呼吸闪烁)。
+/// - **外框**是"这个应用在这儿"的常驻标识,用中性色(`frame`)。macOS 侧按菜单栏
+///   明暗自适应白/黑 —— 那边的惯例就是单色描边图标;Win32 侧用中性灰,深浅两种
+///   任务栏都看得见。
+/// - **`>`** 承载状态语义(`chevron`:黄/蓝/绿/灰),与主窗口 StatusDot 按语义对齐。
+///   `chevron_alpha` 同时兼顾暗帧([`DIM`])与安静态淡出([`Blink::idle_alpha`])。
 ///
+/// `frame` 传 `None` 就只画 `>`(留给不需要外框的调用方)。
+///
+/// 按到图形的距离做 1px 软边抗锯齿;返回 **RGBA**(Win32 那一层再转预乘 BGRA)。
 /// 几何全按 `size` 取比例 —— Win32 画布跟着 `SM_CXSMICON` 走(16px@100%),
 /// macOS 是固定的 44px(22pt@2x),同一份代码要在两边都画得出来。
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-fn compose_frame_rgba(size: u32, color: [u8; 3], dim: bool) -> Vec<u8> {
+fn compose_frame_rgba(
+    size: u32,
+    chevron: [u8; 3],
+    chevron_alpha: f32,
+    frame: Option<[u8; 3]>,
+) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let s = size as f32;
-    let half_stroke = s * STROKE_RATIO;
-    // `>` 的三个折点:左上 → 右中(尖端)→ 左下。水平范围 0.32~0.68 使整体居中。
-    let (ax, ay) = (s * 0.32, s * 0.30);
-    let (bx, by) = (s * 0.68, s * 0.50);
-    let (cx, cy) = (s * 0.32, s * 0.70);
+    let center = s / 2.0;
+    let frame_half = center - s * FRAME_INSET;
+    let frame_radius = s * FRAME_RADIUS;
+    let frame_stroke = s * FRAME_STROKE;
+    let chev_stroke = s * STROKE_RATIO;
+    // `>` 的三个折点:左上 → 右中(尖端)→ 左下,整体在框内居中
+    let (ax, ay) = (s * 0.33, s * 0.28);
+    let (bx, by) = (s * 0.66, s * 0.50);
+    let (cx, cy) = (s * 0.33, s * 0.72);
+
     for y in 0..size {
         for x in 0..size {
             // 采样点取像素中心
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let dist = dist_to_segment(px, py, ax, ay, bx, by)
+
+            let a_frame = match frame {
+                Some(_) => {
+                    let d = dist_to_round_rect(px, py, center, center, frame_half, frame_radius);
+                    (frame_stroke + 0.5 - d).clamp(0.0, 1.0)
+                }
+                None => 0.0,
+            };
+
+            let d_chev = dist_to_segment(px, py, ax, ay, bx, by)
                 .min(dist_to_segment(px, py, bx, by, cx, cy));
-            // 1px 软边抗锯齿
-            let mut alpha = (half_stroke + 0.5 - dist).clamp(0.0, 1.0);
-            if dim {
-                alpha *= DIM;
-            }
+            let a_chev = (chev_stroke + 0.5 - d_chev).clamp(0.0, 1.0) * chevron_alpha;
+
+            // 两者不重叠(`>` 在框内),真撞上时谁实谁赢
+            let (color, alpha) = if a_chev >= a_frame {
+                (chevron, a_chev)
+            } else {
+                (frame.unwrap_or(chevron), a_frame)
+            };
             let alpha = (alpha * 255.0) as u8;
             if alpha > 0 {
                 let idx = ((y * size + x) * 4) as usize;
@@ -322,9 +379,24 @@ impl Blink {
 
     /// 走一帧。返回**是否需要重绘**。
     ///
-    /// `colors` = 活跃颜色数;安静 / 聚焦 / 已定格 / 开关关掉都不推帧。
+    /// `colors` = 活跃颜色数。三种走法:
+    /// - **安静(colors == 0)**:推进 `>` 的淡出相位。**与焦点无关** —— 没事发生
+    ///   就该安静下去,不管人有没有在看着窗口(闪烁才是「要你注意」,这个不是);
+    /// - 聚焦 / 已定格:不动;
+    /// - 其余:原来的闪烁相位。
     fn tick(&mut self, colors: usize, enabled: bool, focused: bool) -> bool {
-        if !enabled || colors == 0 || focused || self.settled {
+        if !enabled || self.settled {
+            return false;
+        }
+        if colors == 0 {
+            self.frame = self.frame.wrapping_add(1);
+            if self.frame >= IDLE_HOLD_FRAMES + IDLE_FADE_FRAMES {
+                // 淡完了就定格(只剩外框),别再每 600ms 白画一帧
+                self.settled = true;
+            }
+            return true;
+        }
+        if focused {
             return false;
         }
         if colors == 1 && self.frame >= BURST_FRAMES {
@@ -334,6 +406,17 @@ impl Blink {
             self.frame = self.frame.wrapping_add(1);
         }
         true
+    }
+
+    /// 安静态下 `>` 的不透明度:前 [`IDLE_HOLD_FRAMES`] 帧全亮,之后线性淡到 0。
+    ///
+    /// 只在 `colors == 0` 时有意义 —— 有状态时 `>` 一律全亮(明暗由暗帧管)。
+    fn idle_alpha(&self) -> f32 {
+        if self.frame <= IDLE_HOLD_FRAMES {
+            return 1.0;
+        }
+        let faded = (self.frame - IDLE_HOLD_FRAMES) as f32 / IDLE_FADE_FRAMES as f32;
+        (1.0 - faded).clamp(0.0, 1.0)
     }
 
     /// 现在处于「该闪」的状态吗(聚焦或已定格都算静止)。
@@ -458,13 +541,15 @@ mod platform {
         AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
     };
     use objc2_app_kit::{
-        NSApplication, NSBitmapImageRep, NSDeviceRGBColorSpace, NSImage, NSMenu, NSMenuItem,
-        NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+        NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+        NSBitmapImageRep, NSDeviceRGBColorSpace, NSImage, NSMenu, NSMenuItem, NSStatusBar,
+        NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength,
     };
-    use objc2_foundation::{NSObject, NSObjectProtocol, NSSize, NSString, NSTimer};
+    use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSSize, NSString, NSTimer};
 
     use super::{
-        BLINK_MS, Blink, TrayEvent, TraySnapshot, active_colors, compose_frame_rgba, frame_color,
+        BLINK_MS, Blink, DIM, FRAME_DARK, FRAME_LIGHT, TrayEvent, TraySnapshot, active_colors,
+        compose_frame_rgba, frame_color,
     };
     use crate::i18n::t;
 
@@ -481,15 +566,19 @@ mod platform {
     ///
     /// **不设 template**:模板图会被系统按菜单栏明暗重新着色,而这三盏灯的颜色
     /// 本身就是语义(黄/蓝/绿),被染成单色就全废了。
+    ///
+    /// ⚠️ **planes 必须传 NULL**,让 `NSBitmapImageRep` 自己分配像素缓冲,再把帧
+    /// 拷进去。传我们自己的指针的话它**不拷贝、只引用**(Apple 文档:
+    /// 「If planes is not NULL … the receiver doesn't copy the data」)—— 而入参
+    /// 那块缓冲是调用方的局部 `Vec`,函数一返回就没了。踩过一次:菜单栏上画出
+    /// 一片乱码条纹,那是已释放内存被复用后的残留。
     fn image_from_rgba(rgba: &[u8], size: u32) -> Option<Retained<NSImage>> {
-        let mut ptr = rgba.as_ptr() as *mut u8;
-        // SAFETY: `planes` 指向本函数入参那块存活的缓冲;宽高/行距/位深与
+        // SAFETY: planes 传 NULL 走「rep 自己分配」那条路;宽高/行距/位深与
         // `compose_frame_rgba` 的输出格式(RGBA8,4 字节/像素)逐项对应。
-        // NSBitmapImageRep 在 init 时把像素拷走,不持有这个指针。
         let rep = unsafe {
             NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
                 NSBitmapImageRep::alloc(),
-                &mut ptr,
+                std::ptr::null_mut(),
                 size as isize,
                 size as isize,
                 8,
@@ -501,6 +590,16 @@ mod platform {
                 32,
             )
         }?;
+        let dst = rep.bitmapData();
+        if dst.is_null() {
+            return None;
+        }
+        // 取 min 兜住:rep 按 bytesPerRow×height 分配,与入参同长,
+        // 真要对不上也宁可少拷一点,不越界
+        let len = rgba.len().min((size as usize * 4) * size as usize);
+        // SAFETY: dst 是 rep 自己那块至少 len 字节的缓冲,两块内存不重叠
+        unsafe { std::ptr::copy_nonoverlapping(rgba.as_ptr(), dst, len) };
+
         let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(ICON_PT, ICON_PT));
         image.addRepresentation(&rep);
         Some(image)
@@ -585,18 +684,53 @@ mod platform {
         blink: Blink,
     }
 
+    /// 菜单栏当前是深色吗 —— 决定外框画白还是画黑。
+    ///
+    /// 问的是**按钮自己**的 `effectiveAppearance` 而不是 `NSApp` 的:图标就挂在
+    /// 菜单栏里,那里的明暗才是它要融进去的背景。
+    ///
+    /// macOS 那些看着「都是白的」的菜单栏图标,本体是**模板图**(系统按背景自动
+    /// 反色)。这里不能整图模板化 —— 那会把承载状态语义的彩色 `>` 一起染成单色,
+    /// 于是只好自己判一次明暗,只给外框用。
+    fn menu_bar_is_dark(button: &NSStatusBarButton) -> bool {
+        let appearance = button.effectiveAppearance();
+        // SAFETY: 两个都是 AppKit 的全局外观名常量
+        let names = NSArray::from_slice(&[unsafe { NSAppearanceNameAqua }, unsafe {
+            NSAppearanceNameDarkAqua
+        }]);
+        match appearance.bestMatchFromAppearancesWithNames(&names) {
+            // SAFETY: 同上
+            Some(name) => &*name == unsafe { NSAppearanceNameDarkAqua },
+            // 匹配不出来按深色处理:菜单栏深色是更常见的那一种
+            None => true,
+        }
+    }
+
     /// 按当前快照与闪烁相位重画图标。
     fn redraw(st: &mut State, mtm: MainThreadMarker) {
+        let Some(button) = st.item.button(mtm) else {
+            return;
+        };
         let colors = active_colors(st.snapshot.lamps);
         let (color, dim) = frame_color(
             &colors,
             st.blink.frame,
             st.blink.blinking(st.snapshot.focused),
         );
-        let rgba = compose_frame_rgba(ICON_PX, color, dim);
-        let Some(button) = st.item.button(mtm) else {
-            return;
+        // 安静态:`>` 淡出,只留外框;有状态:全亮,暗帧时压到 DIM
+        let chevron_alpha = if colors.is_empty() {
+            st.blink.idle_alpha()
+        } else if dim {
+            DIM
+        } else {
+            1.0
         };
+        let frame = if menu_bar_is_dark(&button) {
+            FRAME_LIGHT
+        } else {
+            FRAME_DARK
+        };
+        let rgba = compose_frame_rgba(ICON_PX, color, chevron_alpha, Some(frame));
         if let Some(image) = image_from_rgba(&rgba, ICON_PX) {
             button.setImage(Some(&image));
         }
@@ -776,8 +910,8 @@ mod platform {
     use windows::core::{PCWSTR, w};
 
     use super::{
-        BLINK_MS, Blink, Lamps, TrayEntry, TrayEvent, TraySnapshot, active_colors,
-        compose_frame_rgba, frame_color,
+        BLINK_MS, Blink, DIM, FRAME_NEUTRAL, Lamps, TrayEntry, TrayEvent, TraySnapshot,
+        active_colors, compose_frame_rgba, frame_color,
     };
 
     /// 托盘图标的回调消息(shell → 我们的窗口)。
@@ -1046,7 +1180,15 @@ mod platform {
             let colors = active_colors(self.lamps);
             let blinking = self.blink.blinking(self.focused);
             let (color, dim) = frame_color(&colors, self.blink.frame, blinking);
-            let icon = make_icon(self.icon_size, color, dim);
+            // 安静态:`>` 淡出,只留外框;有状态:全亮,暗帧时压到 DIM
+            let chevron_alpha = if colors.is_empty() {
+                self.blink.idle_alpha()
+            } else if dim {
+                DIM
+            } else {
+                1.0
+            };
+            let icon = make_icon(self.icon_size, color, chevron_alpha);
 
             let mut data = self.base_data(hwnd);
             data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
@@ -1260,8 +1402,10 @@ mod platform {
     /// shell 走 `AlphaBlend` 画托盘图标,颜色位图必须是**预乘** BGRA;
     /// 掩码位图(1bpp)对 32bpp 图标基本只是形式要求,但不能省、也不能不清零
     /// (`CreateBitmap` 的初始内容是未定义的)。
-    fn make_icon(size: i32, color: [u8; 3], dim: bool) -> Option<OwnedIcon> {
-        let rgba = compose_frame_rgba(size as u32, color, dim);
+    fn make_icon(size: i32, color: [u8; 3], chevron_alpha: f32) -> Option<OwnedIcon> {
+        // 外框用中性灰:深浅两种任务栏都看得见,不必去读
+        // `Themes\Personalize\SystemUsesLightTheme` 判主题
+        let rgba = compose_frame_rgba(size as u32, color, chevron_alpha, Some(FRAME_NEUTRAL));
         let pixels = (size * size) as usize;
 
         let bmi = BITMAPINFO {
@@ -1542,7 +1686,6 @@ mod tests {
     fn 闪烁相位三档() {
         let mut blink = Blink::default();
         assert!(!blink.tick(1, true, true), "聚焦时不推帧");
-        assert!(!blink.tick(0, true, false), "安静时不推帧");
         assert!(!blink.tick(1, false, false), "开关关掉不推帧");
 
         // 单状态:BURST_FRAMES 帧之后定格,再也不推
@@ -1570,16 +1713,57 @@ mod tests {
         assert!(!blink.settled);
     }
 
-    /// 画布:笔画覆盖中心(`>` 够粗,开口处也被盖住),四角必须完全透明。
+    /// 安静态:`>` 先亮一会儿再淡到透明,淡完定格(只剩外框)。
+    ///
+    /// **与焦点无关** —— 没事发生就该安静下去,不管人有没有看着窗口。
+    /// 这与闪烁相反:闪烁是「要你注意」,聚焦时自然不闪。
     #[test]
-    fn 提示符画在画布正中且四角透明() {
+    fn 安静态提示符淡出后定格() {
+        let mut blink = Blink::default();
+        assert_eq!(blink.idle_alpha(), 1.0, "刚安静下来时全亮");
+
+        // 保持期:仍是全亮
+        for _ in 0..IDLE_HOLD_FRAMES {
+            assert!(blink.tick(0, true, false), "淡出期间要重绘");
+        }
+        assert_eq!(blink.idle_alpha(), 1.0, "保持期内不该开始淡");
+
+        // 淡出期:逐帧变淡
+        let mut last = blink.idle_alpha();
+        for _ in 0..IDLE_FADE_FRAMES {
+            assert!(blink.tick(0, true, false));
+            let now = blink.idle_alpha();
+            assert!(now < last, "应当逐帧变淡:{last} → {now}");
+            last = now;
+        }
+        assert_eq!(last, 0.0, "淡完是全透明");
+        assert!(blink.settled, "淡完就定格");
+        assert!(!blink.tick(0, true, false), "定格之后不再推帧");
+
+        // 聚焦时照样淡(与闪烁不同)
+        let mut focused = Blink::default();
+        assert!(focused.tick(0, true, true), "安静态的淡出不看焦点");
+    }
+
+    /// `>` 尖端所在像素的字节下标。几何按 `size` 取比例,任何画布都落在实心笔画上
+    /// —— **不能拿画布正中当采样点**:`>` 的开口正对着中心,那里是空的。
+    fn chevron_tip(size: u32) -> usize {
+        let s = size as f32;
+        let x = (s * 0.66) as u32;
+        let y = (s * 0.50) as u32;
+        ((y * size + x) * 4) as usize
+    }
+
+    /// 画布:`>` 的笔画是纯色不透明,四角必须完全透明(圆角框也够不到)。
+    #[test]
+    fn 提示符画得出笔画且四角透明() {
         const SIZE: u32 = 16;
-        let rgba = compose_frame_rgba(SIZE, GREEN, false);
+        let rgba = compose_frame_rgba(SIZE, GREEN, 1.0, None);
         assert_eq!(rgba.len(), (SIZE * SIZE * 4) as usize);
-        let center = ((SIZE / 2) * SIZE + SIZE / 2) as usize * 4;
-        assert_eq!(&rgba[center..center + 3], &GREEN);
-        assert_eq!(rgba[center + 3], 255);
-        // 四角离笔画很远
+        let tip = chevron_tip(SIZE);
+        assert_eq!(&rgba[tip..tip + 3], &GREEN);
+        assert_eq!(rgba[tip + 3], 255);
+        // 四角离图形很远
         assert_eq!(rgba[3], 0);
         assert_eq!(rgba[(SIZE * SIZE * 4 - 1) as usize], 0);
     }
@@ -1591,7 +1775,7 @@ mod tests {
     #[test]
     fn 提示符左侧开口是空的() {
         for size in [16u32, 20, 24, 32, 44] {
-            let rgba = compose_frame_rgba(size, GREEN, false);
+            let rgba = compose_frame_rgba(size, GREEN, 1.0, None);
             let s = size as f32;
             // 折线的水平起点是 0.32s、尖端 0.68s;取 0.36s 处的中线,
             // 它在两条笔画之间的开口里(而半径 0.36s 的圆会盖住这里)
@@ -1606,13 +1790,53 @@ mod tests {
     #[test]
     fn 暗帧压低_alpha_不改颜色() {
         const SIZE: u32 = 16;
-        let bright = compose_frame_rgba(SIZE, YELLOW, false);
-        let dim = compose_frame_rgba(SIZE, YELLOW, true);
-        let center = ((SIZE / 2) * SIZE + SIZE / 2) as usize * 4;
-        assert_eq!(bright[center + 3], 255);
-        let a = dim[center + 3];
+        let bright = compose_frame_rgba(SIZE, YELLOW, 1.0, None);
+        let dim = compose_frame_rgba(SIZE, YELLOW, DIM, None);
+        let tip = chevron_tip(SIZE);
+        assert_eq!(bright[tip + 3], 255);
+        let a = dim[tip + 3];
         assert!(a > 0 && a < 100, "暗帧 alpha 应当落在 (0,100),实际 {a}");
-        assert_eq!(&dim[center..center + 3], &YELLOW);
+        assert_eq!(&dim[tip..tip + 3], &YELLOW);
+    }
+
+    /// 外框:`frame` 给了就画一圈,给 `None` 就只有 `>`。
+    ///
+    /// 外框是「这个应用在这儿」的常驻标识 —— 安静态 `>` 淡光之后全靠它,
+    /// 没有它图标会整个消失,那会被当成程序退了。
+    #[test]
+    fn 外框可开关且用自己的颜色() {
+        const SIZE: u32 = 44;
+        // 框的左边线在 x≈0.06s 处,取纵向中点采样
+        let x = (SIZE as f32 * FRAME_INSET) as u32;
+        let y = SIZE / 2;
+        let idx = ((y * SIZE + x) * 4) as usize;
+
+        let with = compose_frame_rgba(SIZE, GREEN, 1.0, Some(FRAME_LIGHT));
+        assert_eq!(with[idx + 3], 255, "该处应当有外框");
+        assert_eq!(
+            &with[idx..idx + 3],
+            &FRAME_LIGHT,
+            "外框用自己的颜色,不是状态色"
+        );
+
+        let without = compose_frame_rgba(SIZE, GREEN, 1.0, None);
+        assert_eq!(without[idx + 3], 0, "不给 frame 就不该有框");
+    }
+
+    /// 安静态淡出:`>` 透明之后,外框仍在(图标不会整个消失)。
+    #[test]
+    fn 提示符淡光后外框仍在() {
+        const SIZE: u32 = 44;
+        let rgba = compose_frame_rgba(SIZE, GRAY, 0.0, Some(FRAME_LIGHT));
+
+        // `>` 的尖端所在处应当空了
+        let chev = chevron_tip(SIZE);
+        assert_eq!(rgba[chev + 3], 0, "淡完之后不该还有笔画");
+
+        // 外框仍然实心
+        let fx = (SIZE as f32 * FRAME_INSET) as u32;
+        let frame = (((SIZE / 2) * SIZE + fx) * 4) as usize;
+        assert_eq!(rgba[frame + 3], 255, "外框必须留着");
     }
 
     /// 画布尺寸两边不同(Win32 跟 `SM_CXSMICON`,macOS 固定 44px),
@@ -1620,10 +1844,10 @@ mod tests {
     #[test]
     fn 不同画布尺寸都画得出笔画() {
         for size in [16u32, 20, 24, 32, 44] {
-            let rgba = compose_frame_rgba(size, BLUE, false);
-            let center = ((size / 2) * size + size / 2) as usize * 4;
-            assert_eq!(&rgba[center..center + 3], &BLUE, "size={size}");
-            assert_eq!(rgba[center + 3], 255, "size={size}");
+            let rgba = compose_frame_rgba(size, BLUE, 1.0, None);
+            let tip = chevron_tip(size);
+            assert_eq!(&rgba[tip..tip + 3], &BLUE, "size={size}");
+            assert_eq!(rgba[tip + 3], 255, "size={size}");
             assert_eq!(rgba[3], 0, "size={size} 左上角应透明");
         }
     }

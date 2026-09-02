@@ -133,6 +133,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSImage",
     "NSImageRep",
     "NSBitmapImageRep",
+    # 外框要按菜单栏明暗自适应白/黑(那边的惯例是单色描边图标),
+    # 得问一次按钮的 effectiveAppearance
+    "NSAppearance",
 ] }
 objc2-foundation = { version = "0.3", features = [
     "NSData",
@@ -143,6 +146,8 @@ objc2-foundation = { version = "0.3", features = [
     "NSTimer",
     "NSDate",
     "NSRunLoop",
+    # bestMatchFromAppearancesWithNames 收一个 NSArray
+    "NSArray",
 ] }
 
 [target.'cfg(windows)'.dependencies]
