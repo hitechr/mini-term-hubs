@@ -30,7 +30,7 @@
 //!      └─ 全窗口透明遮罩(occlude + on_mouse_down = 关闭)
 //!          └─ anchored(鼠标点).snap_to_window_with_margin(4px)  ← 贴边自动收拢
 //!              └─ 菜单面板(occlude —— 面板内的点击不算「点外」)
-//!                  └─ 子菜单 absolute left:100%(挂在父项里,跟着父项走)
+//!                  └─ 子菜单 absolute left:100% + ml 5px(挂在父项里,跟着父项走)
 //! ```
 //!
 //! 贴边翻转由 `snap_to_window_with_margin` 白拿(原版是自己算 `placeInViewport`);
@@ -1039,6 +1039,12 @@ impl ContextMenu {
                 div()
                     .absolute()
                     .left(relative(1.0))
+                    // 再推出父面板的内边距 + 边框:`left: 100%` 相对的是**菜单项**,
+                    // 而菜单项待在面板的 4px padding 里边、面板外头还有 1px 边框
+                    // —— 直接贴上去的话子菜单会压在父面板右缘内侧 5px 上,看着
+                    // 就是两个框叠了一条边(「查看会话记录」那个宽面板尤其明显)。
+                    // 5 的账:padding 4 + border 1,推完两个框正好相切。
+                    .ml(px(5.0))
                     .top(px(-4.0))
                     .child(anchored().snap_to_window_with_margin(px(4.0)).child(submenu)),
             );
