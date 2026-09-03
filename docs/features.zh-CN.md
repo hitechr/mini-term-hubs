@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.1.7-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-1.2.4-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="platform">
   <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-experimental-lightgrey" alt="platform-experimental">
   <img src="https://img.shields.io/badge/GPUI-native-8A2BE2" alt="gpui">
@@ -83,10 +83,11 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 
 ### AI 进程感知
 
-- **Hook 事件系统** — 接入 Claude Code / Codex / Grok Build 官方 Hook API，接收 AI 工具事件（SessionStart / End、ToolUse 等），比进程轮询更精准及时；内置 `miniterm-hook` CLI 工具供 Hook 系统调用，自动 POST 事件到本地服务器；设置界面按「注入目标」勾选注册 / 卸载 Hook 配置——Claude Code / Codex / Grok 三家各一行可选，注册与卸载只作用于所选（三份配置文件互不相干，只用其中一家的用户没理由被写另外两家的配置）；每行显示该家的配置文件路径与注册现状（未注册 / 已注册 N 个事件 / 旧版本 N⁄M，黄色提示重新注册可补齐新增事件），默认勾选已经装了的那几家（老用户再点注册就是纯补齐），一家都没装过时全选保住首次一键注册的体验；写入合并而非覆盖用户已有 hook。Codex 权限请求从审批到工具执行完成期间持续保持 `ai-working`，避免提前触发任务完成提醒
-- **实时状态检测** — Hook 一旦接入即为该面板的状态来源，逐轮状态直接由 hook 事件决定，不看输出活跃度（AI 空闲期 TUI 的定时重绘曾被误判为「又在工作」，导致完成通知反复触发）；无 hook 的面板降级为输入检测（识别键入的 `claude` / `codex` / `opencode` / `pi` / `grok` 命令，含 ↑ 历史与 Tab 补全的行快照兜底）加 500ms 输出活跃度轮询，显示 idle / working / error 状态
+- **Hook 事件系统** — 接入 Claude Code / Codex / Grok Build / oh-my-pi 官方 Hook API，接收 AI 工具事件（SessionStart / End、ToolUse 等），比进程轮询更精准及时；内置 `miniterm-hook` CLI 工具供 Hook 系统调用，自动 POST 事件到本地服务器（oh-my-pi 改为装进程内扩展，见下）；设置界面按「注入目标」勾选注册 / 卸载 Hook 配置——Claude Code / Codex / Grok / oh-my-pi 各一行可选，注册与卸载只作用于所选（各家配置文件互不相干，只用其中一家的用户没理由被写其它几家的配置）；每行显示该家的配置文件路径与注册现状（未注册 / 已注册 N 个事件 / 旧版本 N⁄M，黄色提示重新注册可补齐新增事件），默认勾选已经装了的那几家（老用户再点注册就是纯补齐），一家都没装过时全选保住首次一键注册的体验；写入合并而非覆盖用户已有 hook。Codex 权限请求从审批到工具执行完成期间持续保持 `ai-working`，避免提前触发任务完成提醒
+- **实时状态检测** — Hook 一旦接入即为该面板的状态来源，逐轮状态直接由 hook 事件决定，不看输出活跃度（AI 空闲期 TUI 的定时重绘曾被误判为「又在工作」，导致完成通知反复触发）；无 hook 的面板降级为输入检测（识别键入的 `claude` / `codex` / `opencode` / `pi` / `grok` / `omp` 命令，含 ↑ 历史与 Tab 补全的行快照兜底）加 500ms 输出活跃度轮询，显示 idle / working / error 状态
 - **Grok Build 的 hook 接入** — `grok`（xAI 的终端 agent）走与 Claude / Codex 同一套 hook 链路，状态徽章、完成播报、AI 启动器与移动端发起会话全通。三处结构性差异各有对策：① grok 默认还会扫描 `~/.claude/settings.json` 的 hooks（Claude 兼容层），同一事件因此会来两趟——sidecar 按 `GROK_SESSION_ID` 加「有没有 argv」判出兼容层那趟并丢弃，而用户只注册了 Claude 时又必须放行（那是唯一来源），判据落在「原生 hook 文件是否在场」上；② 注册进 `~/.grok/hooks/` 的命令是**不含空格的裸文件名**（注册时把 hook 二进制复制进同目录），因为带空格的命令会被 grok 丢给 shell，而 Windows 上具体是 git-bash / pwsh / powershell / cmd 由环境决定、四家引号语义互斥，事件名改由 grok 注入的 `GROK_HOOK_EVENT` 传递；③ grok 没有 `PermissionRequest` 事件，「等你批准」是 `Notification` 的 `permission_prompt` 类型，归一化后点同一盏黄灯，而它的 `task_complete` 是知会不是待办，不点灯。另有一处专门抹平：grok 在会话收尾时会补发一次 `Stop`（`reason` 为 `channel_closed` / `shutdown`），不拦掉的话每次退出 grok 都要白响一声「任务完成」
 - **Grok 的会话记录形态** — 与另外两家「一个文件一个会话」不同，grok 一个会话是**一整个目录**：`{grok_home}/sessions/{URL 编码的 cwd}/{session-id}/`，正文在 `updates.jsonl`（ACP 会话更新流），元信息在 `summary.json`。定位项目走**解码目录名**而不是编码项目路径（后者要逐字复刻它所用编码库的转义集；超长路径退化成 `{slug}-{hash}` 形态时回落读目录内的 `.cwd`）。正文一条消息会被拆成任意多个 chunk 行流式落盘，必须攒到边界（工具调用、回合收尾、对方开口）才算一条，否则一句回答在镜像里会碎成几十条。用量取 `turn_completed` 自带的 usage（按模型分解，ACP 口径的输入含缓存读写，拆成互斥桶后与 `totalTokens` 对齐）；**工具排行对 grok 为空**——持久化的 ACP `tool_call` 只带人类可读的 title，真正的工具名不落盘，拿 title 顶替会往排行里灌自然语言标签
+- **oh-my-pi（omp）的 hook 接入** — `omp`（can1357/oh-my-pi，pi 的分支）没有「shell 命令 hook」，它的扩展点是 Bun 运行时**进程内加载的 TS 模块**。注册因此不是写命令而是把一份自包含的扩展 `miniterm.ts` 写进 `~/.omp/agent/extensions/`（尊重 `PI_CODING_AGENT_DIR` / `PI_CONFIG_DIR` / `PI_PROFILE`），扩展在 omp 进程内直接 `fetch` 本地 hook 服务器——不经 sidecar 二进制，不在 Mini-Term 终端里（没有 `MINITERM_PTY_ID`）时整个是空操作。omp 的生命周期事件被翻译成与 Claude 同名的事件，hook 服务器一行不用改：`agent_start` → `UserPromptSubmit`；`agent_end` → `Stop`（最后一轮 assistant 以错误收场则 `StopFailure`；`stopReason` 为 `aborted` 的上报成 `Stop` + `reason: aborted`，落地为 `Interrupt`，绝不播成「任务完成」）；`tool_call` / `tool_result` → `PreToolUse` / `PostToolUse`（出错 `PostToolUseFailure`）；`ask` 提问工具 → `Elicitation` / `ElicitationResult`（等你作答期间点黄灯）；`tool_approval_requested` / `tool_approval_resolved` → `PermissionRequest` / `PreToolUse` 或 `PermissionDenied`；`auto_retry_start` → 重试类 `Notification`（保持 `ai-working`）；自动压缩 → `PreCompact` / `PostCompact`；`session_switch` / `session_branch` → 旧会话以 `reason: clear` 收尾、新会话 SessionStart；`session_shutdown` → `SessionEnd`。**只有交互式主会话上报**（`ctx.mode === "tui"`）：omp 的子代理（`task` 工具）是同一进程里的独立会话，会把每个扩展工厂再绑定一遍，若照常上报，子代理跑完就会把父会话误报成「已完成」。omp 只在启动时扫描扩展目录，注册后正在运行的实例要重启或执行 `/reload-plugins`；已注册的用户在 Mini-Term 每次启动时扩展会被刷成当前模板，升级自动带过去。会话记录（`~/.omp/agent/sessions/`）尚未接入解析，对话镜像、历史面板、用量统计与会话分支对 omp 仍为空；启动续接靠 hook 上报的会话 id（`omp --resume <id>`）
 - **只靠输入检测识别的 agent** — `opencode` / `pi` 没有接 hook，也没有可解析的本地会话记录：状态徽章、完成播报、AI 启动器与移动端发起会话四条链路照常可用，但对话镜像、AI 历史面板与用量统计对它们为空。镜像的启发式绑定据此设了白名单（`mt-relay::mirror` 的 `agent_has_session_log`），不在名单内直接返回空镜像，不会退而绑到同项目里其它 agent 最新的会话文件、把别人的对话贴到这个 pane 上。命令匹配走 basename 全等，`pip` / `ping` / `pixi` / `pi.py` 不会被误判成 `pi`
 - **徽章卡死的三重兜底** — `Stop` 事件在若干情形下根本不触发：回合因 API 错误结束走 `StopFailure`（映射 ai-idle 并点黄灯提示回来重发）、用户按 Esc / Ctrl+C 打断则不发任何事件（由输入检测收敛，cause=`Interrupt`）；两者都覆盖不到的残余情况再由**停摆判定**兜底——hook 状态停在 ai-working 且状态与 PTY 输出双双静默 10 秒即收敛，此前已触发过退出（Ctrl+D / 双击 Ctrl+C / `/exit`，且之后无 hook 事件扶正）则判为已退出回落 idle，否则降为 ai-idle。三条兜底的结论都**一次性落盘**进 hook 状态，触发一次即收敛不再摆动，且 cause 一律不是 `Stop`，因此不会被当成「任务完成」播报（这正是 v0.9.3 删掉无记忆版兜底的原因）；正等用户批准的面板（如 Codex 的 `PermissionRequest`）豁免停摆判定，否则会连托盘黄灯一并抹掉
 - **状态聚合** — 面板 → 标签页 → 项目逐层聚合，优先级 `error > ai-working > ai-idle > idle`
@@ -140,7 +141,7 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 - **Worktree 子项目** — worktree「设为项目」后挂在主项目下方作子项目（缩进跟随分组），拖出或右键「脱离父项目」可转回顶层，删除父项目时子项目原位晋升不丢失；项目列表为 worktree 项目显示 ⎇ 分支徽章，仓库列表与 Changes 下拉同样标注 worktree 条目；**外部删除的 worktree 自动收敛** —— 窗口重获焦点时探测子项目目录是否还在，AI agent 在终端里跑完 `git worktree remove` 后，目录已消失的子项目连同终端资源一并移除，⎇ 徽章同步重探（仅在父项目目录仍存在时清理，盘符掉线不会误删；SSH 远程与 UNC/WSL 路径不参与），worktree 弹窗「清理失效条目」也会一并移除指向它的项目
 - **文件树** — 集成目录浏览器，自然排序（V1 → V2 → V10 而非字典序），嵌套 `.gitignore` 置灰（每层子目录的忽略规则与 `!pattern` 白名单都会生效，与 git 行为一致），`notify` 文件监听实时刷新
 - **文件操作** — 文件树内新建文件 / 文件夹、重命名、删除、查看内容（Markdown 渲染，图片格式直接展示，二进制与超大文件友好提示）
-- **文件工作区** — 文件树点开的本地 / 远程文件在主区页签中查看、编辑、保存，与终端并列切换：tree-sitter 语法高亮（30+ 语言）按文件类型自动匹配，基础缩进，查找替换（`Ctrl+F`）；`Ctrl+S` 原子落盘（临时文件 + rename，不怕写坏），CRLF 文件按原行尾往返不产生全文件 diff；有未保存修改时关闭先确认，文件被外部改动时干净则静默重载、脏则出提示条；Markdown 预览实时渲染未保存草稿；语法配色跟随主题皮肤。远程文件经 SFTP 读写：保存前比对加载时的基线，远端被别人改过就提示重载或强制覆盖，写入走临时文件 + 备份 + rename，陈旧备份自动清理；刷新失败只出横幅不盖住编辑器；远程文件也可直接下载到本地
+- **文件工作区** — 文件树点开的本地 / 远程文件在主区页签中查看、编辑、保存，与终端并列切换：tree-sitter 语法高亮（30+ 语言）按文件类型自动匹配，基础缩进，查找替换（`Ctrl+F`）；Tab 缩进按制表位（4 列一档）展开显示，Go 这类用 Tab 缩进的文件不再整篇顶格，Git Diff 面板同口径展开，保存时按「展开行 → 原始行」映射逐字还原（只有被编辑过的行按行首缩进折回 Tab），没动过的行原样落盘；`Ctrl+S` 原子落盘（临时文件 + rename，不怕写坏），CRLF 文件按原行尾往返不产生全文件 diff；有未保存修改时关闭先确认，文件被外部改动时干净则静默重载、脏则出提示条；Markdown 预览实时渲染未保存草稿；语法配色跟随主题皮肤。远程文件经 SFTP 读写：保存前比对加载时的基线，远端被别人改过就提示重载或强制覆盖，写入走临时文件 + 备份 + rename，陈旧备份自动清理；刷新失败只出横幅不盖住编辑器；远程文件也可直接下载到本地
 - **文档预览里的图片** — Markdown 与 HTML 预览都能显示图片：相对路径按当前文件所在目录解析成本地资源，「整行只有图片」的行拆出来自绘，宽度取图片原尺寸与正文可用宽的小值（大图不再被 object-fit 压成一条）；SVG 按 2 倍光栅化换算。网络图片（README 顶上的徽章、外链截图）经内置 HTTP 客户端真加载——只放行 `file://` 与 `http(s)://`，10s 超时 + 32MB 响应上限，客户端为进程级单例；拉不动时画成带 alt 的可点占位，点了用系统浏览器打开原图。远程文件的 Markdown 属不可信输入，按渲染器同一份 GFM AST 清洗并迭代到不动点：原始 HTML 整体按源码显示，链接只放行 http(s) / mailto / tel / 锚点，图片不内联加载（整行图片点击后才拉取）；远程 HTML 不进预览、只看源码
 - **HTML 预览** — `.html` 除源码编辑器外另有预览态（简版渲染，顶部一条「无 CSS / 无脚本」说明），`src` / `href` / `poster` 的本地目标改写成 `file://` 才看得到图片与本地资源；工具栏常驻「用浏览器打开」，走 **https 协议关联**而非 `.html` 文件关联（后者常被设成编辑器，点了只会再开一个编辑器）——Windows 读 `https` 的 UserChoice ProgId 再取 `shell\open\command`，三层退让 https → http → 系统级 `HKCR\http`，找不到浏览器直接报错而不悄悄退回文件关联；路径转 URL 时转义 `%`、空格、`#`、`?`
 - **外部编辑器打开** — 文件树右上角按钮一键用配置的编辑器（默认 VS Code）打开当前项目，路径可在「设置 → 系统 → 外部编辑器」自定义；文件可用系统默认应用打开
@@ -195,7 +196,7 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 | Git / 文件 | git2（libgit2）· notify + ignore |
 | 用量统计 | rusqlite 本地账本 · 自绘趋势图 |
 | 移动端中转 | axum + tokio WebSocket（`relay-server/`）· React + Vite PWA（`mobile/`） |
-| 测试 | **1672 个 Rust 测试**（28 个测试目标）+ 中转服务端协议边界测试 |
+| 测试 | **1737 个 Rust 测试**（27 个测试目标）+ 中转服务端协议边界测试 |
 
 ## 快速开始
 
@@ -335,7 +336,7 @@ Root（gpui-component 根，承载 Dialog / 通知层）
 提交代码前请运行：
 
 ```bash
-# 全工作区 Rust 测试（28 个测试目标、1672 例）
+# 全工作区 Rust 测试（27 个测试目标、1737 例）
 cargo test --workspace
 
 # Node 侧测试（仅 2 个文件：ConPTY 打包 / vendored-openssl 守卫）
