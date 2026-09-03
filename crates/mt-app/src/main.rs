@@ -102,6 +102,7 @@ mod ssh_panel;
 mod ssh_registry;
 mod startup_trace;
 mod store;
+mod tab_expansion;
 mod terminal_area;
 mod terminals_panel;
 mod theme;
@@ -1935,6 +1936,29 @@ impl Render for Workspace {
                 )
             })
             .key_context("Workspace")
+            // Esc 中途取消**任何**内部拖拽(pane 拖拽 / 文件树行拖向终端或树内移动 /
+            // 项目列表排序)。原版 `fileDragState.ts` / `paneDragState.ts` 各挂一句
+            // `window.addEventListener('keydown', …, true)`,这里合成一处。
+            //
+            // **必须挂在根、且是捕获相**:按键沿「根 → 焦点节点」下行,焦点在终端上时
+            // `TerminalView` 会把 Esc 翻成 `\x1b` 写进 PTY 并 `stop_propagation`,
+            // 冒泡相收不到;而从文件树起拖时焦点在**文件树行**上(按下即聚焦),
+            // 终端区那一层压根不在派发路径上 —— 挂终端区根容器只对 pane 拖拽有效
+            // (此前正是那样,记档在 `dnd` 模块注释)。
+            //
+            // 只在**真有拖拽在飞**时吞掉这次 Esc,没拖拽时照常放行,终端里按 Esc
+            // 的行为一个字节都不变。各视图的落点残留(高亮/档位)不在这儿清:它们
+            // 都与 `cx.has_active_drag()` 与门、并在自己的 render 里对账,
+            // `stop_active_drag` 自带一次 `window.refresh()` 就够了。资源管理器拖进来的
+            // `ExternalPaths` 不经这里:OLE 拖拽期间 Esc 由拖源(Explorer)处理,
+            // gpui 收到 `FileDropEvent::Exited` 时自己清 active_drag。
+            .capture_key_down(|event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key != "escape" || !cx.has_active_drag() {
+                    return;
+                }
+                cx.stop_active_drag(window);
+                cx.stop_propagation();
+            })
             .on_action(cx.listener(Self::on_new_terminal))
             .on_action(cx.listener(Self::on_close_pane))
             .on_action(cx.listener(Self::on_split_right))
@@ -2078,6 +2102,27 @@ fn main() {
         // 私钥明文副本。同样丢后台:它要遍历目录。
         cx.background_executor()
             .spawn(async { mt_core::cleanup_ssh_temp_keys() })
+            .detach();
+        // 已注册用户的启动期自愈,三家各一条。装机版 `lib.rs::setup` 里原本也是
+        // 一个后台线程按序跑这几条,GPUI 迁移时 hook_registry 逐字搬进了 mt-ai、
+        // 这行调用漏搬,claude/grok 两条自 2026-08-20(b52a654 删 src-tauri)起
+        // 一直没执行过 —— 补回来:
+        // - claude: 补齐新版本新增的 hook 事件(事件集没长过就直接 return,不写盘)
+        // - grok:   兼职把 `{grok_home}/hooks/` 里的 hook 二进制副本刷成当前版本
+        //           (mini-term 升级后旧副本会滞留),故不设「没变化」短路
+        // - codex:  把 config.toml 的 feature 键迁到现行名字(codex_hooks -> hooks),
+        //           面板判「已注册」只看 hooks.json,界面上没有线索提示用户重点
+        //           一次注册;键已是新名字就不落盘
+        // - omp:扩展文件与当前模板不同就整份重写(模板随版本演进)
+        // 四条都只在**已注册过**时才动手 —— 没开过这功能的用户一律不碰他的配置。
+        // 都要读写用户主目录下的文件,故丢后台不挡启动。
+        cx.background_executor()
+            .spawn(async {
+                mt_ai::hook_registry::sync_claude_hooks_if_registered();
+                mt_ai::hook_registry::sync_grok_hooks_if_registered();
+                mt_ai::hook_registry::sync_codex_hooks_feature_if_registered();
+                mt_ai::hook_registry::sync_omp_hooks_if_registered();
+            })
             .detach();
         // 真正的主题在 store 装好之后按 config 装配(`apply_theme_from_config`):
         // 亮/暗/auto + 外置主题包 + 终端配色一次算全。这里先钉一个暗色兜底,
